@@ -334,8 +334,7 @@ local function getPlotFloorPosition()
 end
 
 local function isCarryingEgg()
-    if LocalPlayer:GetAttribute("CloudGuardChasing") == true then return true end
-    local char = getCharacter()
+    local char = LocalPlayer.Character
     if not char then return false end
     if char:FindFirstChild("CarriedAlbum") ~= nil then return true end
     for _, item in ipairs(char:GetChildren()) do
@@ -624,22 +623,17 @@ task.spawn(function()
                 continue
             end
 
-            -- If already holding stolen egg, warp back to plot and secure it first
+            -- If player started toggle while already holding an egg, deposit it at plot first
             if isCarryingEgg() then
-                setStatus("Securing held egg: Warping to Plot...")
                 local _, plotCF = getPlotFloorPosition()
                 if plotCF then
                     root.CFrame = plotCF + Vector3.new(0, 3, 0)
-                    task.wait(0.08)
+                    task.wait(0.06)
                     if DropAlbumRemote then
                         pcall(function() DropAlbumRemote:FireServer() end)
                     end
-                    for _ = 1, 8 do
-                        if not isCarryingEgg() then break end
-                        task.wait(0.05)
-                    end
                 end
-                continue
+                task.wait(0.1)
             end
 
             local eggs = {}
@@ -658,8 +652,8 @@ task.spawn(function()
             end
 
             if #eggs == 0 then
-                setStatus("No matching eggs found. Waiting...")
-                task.wait(0.5)
+                setStatus("Searching for eggs...")
+                task.wait(0.4)
             else
                 local myPos = root.Position
                 local target = nil
@@ -729,22 +723,18 @@ task.spawn(function()
                     local _, plotCF = getPlotFloorPosition()
                     if plotCF then
                         root.CFrame = plotCF + Vector3.new(0, 3, 0)
-                        task.wait(0.08)
+                        task.wait(0.06)
 
                         -- Immediately drop/secure album at base
                         if DropAlbumRemote then
                             pcall(function() DropAlbumRemote:FireServer() end)
                         end
 
-                        for _ = 1, 6 do
-                            if not isCarryingEgg() then break end
-                            task.wait(0.05)
-                        end
-                        setStatus("Egg secured at base! Chaining next...")
+                        setStatus("Returned to Plot! Warping to next egg...")
                     end
 
-                    -- 5. Rapid chaining: immediately ready for next egg
-                    task.wait(0.05)
+                    -- 5. Rapid chaining: immediately ready to steal next egg
+                    task.wait(0.06)
                     isStealingActive = false
                 end
             end
