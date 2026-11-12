@@ -55,21 +55,27 @@ local function safeFireProximityPrompt(prompt)
     end)
     
     local fired = false
-    if fireproximityprompt then
-        pcall(function()
+    if type(fireproximityprompt) == "function" then
+        local ok = pcall(function()
             fireproximityprompt(prompt, 0)
-            fired = true
         end)
+        fired = ok
     end
-    
-    pcall(function()
-        if prompt.InputHoldBegin and prompt.InputHoldEnd then
-            prompt:InputHoldBegin()
-            task.wait(0.015)
-            prompt:InputHoldEnd()
-            fired = true
-        end
-    end)
+
+    -- Use Roblox's prompt input methods only when the executor helper is unavailable.
+    -- Do not trigger both paths, which can cause duplicate interactions.
+    if not fired then
+        local ok = pcall(function()
+            if prompt.InputHoldBegin and prompt.InputHoldEnd then
+                prompt:InputHoldBegin()
+                task.wait(0.05)
+                prompt:InputHoldEnd()
+            else
+                error("Prompt input methods unavailable")
+            end
+        end)
+        fired = ok
+    end
     
     task.delay(0.5, function()
         pcall(function()
@@ -691,12 +697,152 @@ end
 -- CORE ENGINE SERVICES
 ---------------------------------------------------------------------------
 
--- 1. AUTO STEAL EGGS SERVICE (Ultra-Fast Snatch & Anti-Guardian Return)
+-- 1. AUTO STEAL EGGS SERVICE (Pickup Confirmation + Safe Return)
 local isStealingActive = false
+
+local function findEggPrompt(eggObject)
+    if not eggObject then return nil end
+    local prompt = eggObject:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if not prompt then
+        local casePart = eggObject:FindFirstChild("CasePart", true)
+        if casePart then
+            prompt = casePart:FindFirstChildWhichIsA("ProximityPrompt", true)
+        end
+    end
+    return prompt
+end
+
+local function getPromptPosition(prompt, fallbackPosition)
+    if prompt then
+        local part = prompt.Parent
+        if part and not part:IsA("BasePart") then
+            part = part:FindFirstAncestorWhichIsA("BasePart")
+        end
+        if part and part:IsA("BasePart") then
+            return part.Position
+        end
+    end
+    return fallbackPosition
+end
+
+local function isEggTool(item)
+    return item and item:IsA("Tool") and (
+        item:GetAttribute("IsPhotocard") == true
+        or item:GetAttribute("CasePlacementTool") == true
+        or item:GetAttribute("AlbumZone") ~= nil
+        or item.Name:find("Egg") ~= nil
+        or item.Name:find("Album") ~= nil
+        or item.Name:find("Stolen") ~= nil
+    )
+end
+
+local function getCarriedEggCount()
+    local count = 0
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+
+    if char then
+        if char:FindFirstChild("CarriedAlbum") then
+            count = count + 1
+        end
+        for _, item in ipairs(char:GetChildren()) do
+            if isEggTool(item) then count = count + 1 end
+        end
+    end
+
+    if backpack then
+        for _, item in ipairs(backpack:GetChildren()) do
+            if isEggTool(item) then count = count + 1 end
+        end
+    end
+    return count
+end
+
+local function isPickupConfirmed(eggObject, previousCount)
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+
+    -- Strongest confirmation: the target itself moved into our character/backpack.
+    if eggObject and ((char and eggObject:IsDescendantOf(char))
+        or (backpack and eggObject:IsDescendantOf(backpack))) then
+        return true
+    end
+
+    -- Some versions of the game represent a carried egg as a separate object/tool.
+    if getCarriedEggCount() > previousCount then
+        return true
+    end
+
+    -- Server ownership attributes are useful confirmation when provided by the game.
+    if eggObject and eggObject.Parent
+        and (eggObject:GetAttribute("OwnerUserId") == LocalPlayer.UserId
+        or eggObject:GetAttribute("PersonalOwnerUserId") == LocalPlayer.UserId) then
+        return true
+    end
+
+    return false
+end
+
+local function tryPickupEgg(target, root)
+    if not target or not target.Object or not target.Object.Parent or not root then
+        return false
+    end
+
+    local eggObject = target.Object
+    local prompt = findEggPrompt(eggObject)
+    local previousCount = getCarriedEggCount()
+    local fallbackPosition = target.Position or target.CFrame.Position
+    local promptPosition = getPromptPosition(prompt, fallbackPosition)
+    if not promptPosition then return false end
+
+    -- Move close to the actual prompt part, not merely the model pivot.
+    root.CFrame = CFrame.new(promptPosition + Vector3.new(0, 1.5, 0))
+    root.AssemblyLinearVelocity = Vector3.zero
+    task.wait(0.15)
+
+    for attempt = 1, 2 do
+        if isPickupConfirmed(eggObject, previousCount) then
+            return true
+        end
+
+        prompt = findEggPrompt(eggObject)
+        if prompt and prompt.Parent and prompt.Enabled then
+            safeFireProximityPrompt(prompt)
+        elseif not prompt then
+            -- Touch interaction is only a fallback for eggs that genuinely have no prompt.
+            local part = eggObject:FindFirstChild("CasePart", true)
+                or eggObject:FindFirstChildWhichIsA("BasePart", true)
+            if part and part:IsA("BasePart") and type(firetouchinterest) == "function" then
+                pcall(function()
+                    firetouchinterest(root, part, 0)
+                    task.wait(0.08)
+                    firetouchinterest(root, part, 1)
+                end)
+            end
+        end
+
+        -- Give the server time to process the interaction and replicate inventory changes.
+        local deadline = os.clock() + 1.0
+        repeat
+            if isPickupConfirmed(eggObject, previousCount) then
+                return true
+            end
+            task.wait(0.05)
+        until os.clock() >= deadline
+
+        if attempt < 2 then
+            if not eggObject.Parent then break end
+            task.wait(0.15)
+        end
+    end
+
+    return isPickupConfirmed(eggObject, previousCount)
+end
 
 task.spawn(function()
     while Running do
         task.wait(getDelay(0.12))
+
         if Config.AutoStealEggs and not isStealingActive then
             local root = getRootPart()
             if not root then
@@ -704,19 +850,14 @@ task.spawn(function()
                 continue
             end
 
-            -- NOTE: Do NOT drop eggs at base! Player keeps holding eggs or safe zone scores automatically.
-
             local eggs = {}
-
-            -- Dedicated Admin & Exclusive Global Sniper Check (when enabled)
             if Config.SnipeAdminEggs then
                 local adminEggs = getAdminAndExclusiveEggs()
                 if #adminEggs > 0 then
                     eggs = adminEggs
-                    setStatus("⚡ Admin Egg detected! Sniping...")
+                    setStatus("Admin/Exclusive egg detected...")
                 end
             end
-
             if #eggs == 0 then
                 eggs = getAllEligibleEggs()
             end
@@ -726,102 +867,71 @@ task.spawn(function()
                 task.wait(0.3)
             else
                 local myPos = root.Position
-                local target = nil
+                local target
 
-                if Config.StealPriority == "Biggest" then
-                    table.sort(eggs, function(a, b)
-                        local wA = a.Weight or getEggSize(a.Object)
-                        local wB = b.Weight or getEggSize(b.Object)
-                        if wA == wB then
-                            return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
-                        end
-                        return wA > wB
-                    end)
-                    target = eggs[1]
-                elseif Config.StealPriority == "Random" then
+                if Config.StealPriority == "Random" then
                     target = eggs[math.random(1, #eggs)]
-                else -- "Nearest"
-                    table.sort(eggs, function(a, b)
-                        return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
-                    end)
-                    target = eggs[1]
+                else
+                    -- Select in one pass; avoid sorting the entire target list.
+                    for _, candidate in ipairs(eggs) do
+                        if not target then
+                            target = candidate
+                        elseif Config.StealPriority == "Biggest" then
+                            local candidateWeight = candidate.Weight or 0
+                            local targetWeight = target.Weight or 0
+                            if candidateWeight > targetWeight
+                                or (candidateWeight == targetWeight
+                                and (candidate.Position - myPos).Magnitude < (target.Position - myPos).Magnitude) then
+                                target = candidate
+                            end
+                        elseif (candidate.Position - myPos).Magnitude < (target.Position - myPos).Magnitude then
+                            target = candidate
+                        end
+                    end
                 end
 
                 if target and target.Object and target.Object.Parent then
                     isStealingActive = true
-                    local targetLabel = tostring(target.Name) .. " (" .. target.Rarity .. (target.WeightFormatted and (" • " .. target.WeightFormatted) or "") .. ")"
-                    setStatus("Snatching " .. targetLabel .. "...")
-
-                    -- Pre-calculate return Plot CFrame BEFORE warp so zero time is wasted
+                    local returnCF = root.CFrame
                     local _, plotCF = getPlotFloorPosition()
-                    local returnCF = plotCF and (plotCF + Vector3.new(0, 3, 0)) or (root.CFrame)
-
-                    -- Neutralize nearby guardian collision and touch detection
-                    neutralizeNearbyGuards(target.Position, 55)
-
-                    -- 1. Instant warp elevated 4.0 studs above ground guardian melee reach (HitDistance is 2.5 - 5 studs)
-                    root.CFrame = target.CFrame + Vector3.new(0, 4.0, 0)
-                    root.AssemblyLinearVelocity = Vector3.zero
-
-                    -- 2. Find ProximityPrompt inside egg or touch fallback
-                    local prompt = target.Object:FindFirstChildWhichIsA("ProximityPrompt", true)
-                    if not prompt then
-                        local casePart = target.Object:FindFirstChild("CasePart")
-                        if casePart then
-                            prompt = casePart:FindFirstChildWhichIsA("ProximityPrompt", true)
-                        end
+                    if plotCF then
+                        returnCF = plotCF + Vector3.new(0, 3, 0)
                     end
 
-                    -- 3. Fire prompt interaction instantly with certainty
-                    if prompt then
-                        safeFireProximityPrompt(prompt)
+                    local targetLabel = tostring(target.Name) .. " (" .. tostring(target.Rarity)
+                        .. (target.WeightFormatted and (" • " .. target.WeightFormatted) or "") .. ")"
+                    setStatus("Approaching " .. targetLabel .. "...")
+
+                    local success, result = pcall(function()
+                        local pickedUp = tryPickupEgg(target, root)
+                        return pickedUp
+                    end)
+
+                    -- Always restore the player to the saved position, even if interaction errors.
+                    pcall(function()
+                        if root and root.Parent then
+                            root.CFrame = returnCF
+                            root.AssemblyLinearVelocity = Vector3.zero
+                        end
+                    end)
+
+                    if success and result then
+                        stolenBlacklist[target.Object] = os.clock() + 30
+                        setStatus("Pickup confirmed! Returned to plot.")
+                    elseif not success then
+                        stolenBlacklist[target.Object] = os.clock() + 3
+                        setStatus("Pickup error; returned to plot. Check game prompt/interaction.")
                     else
-                        local part = target.Object:FindFirstChildWhichIsA("BasePart", true)
-                        if part and root and firetouchinterest then
-                            pcall(function()
-                                firetouchinterest(root, part, 0)
-                                task.wait(0.01)
-                                firetouchinterest(root, part, 1)
-                            end)
-                        end
+                        stolenBlacklist[target.Object] = os.clock() + 3
+                        setStatus("Pickup not confirmed; returned to plot.")
                     end
 
-                    -- 4. Micro-poll confirmation: Check if grabbed (held in hand, prompt disabled, or egg moved)
-                    -- Polls every 0.02s up to max 0.2s. The instant grabbed, snaps to base IMMEDIATELY!
-                    for _ = 1, 10 do
-                        local grabbed = isCarryingEgg() 
-                            or (prompt and (not prompt.Parent or not prompt.Enabled)) 
-                            or (not target.Object.Parent or not target.Object:IsDescendantOf(workspace))
-                        if grabbed then
-                            break
-                        end
-                        task.wait(0.02)
-                    end
-
-                    -- 5. INSTANT SNAP BACK TO PLOT FLOOR
-                    root.CFrame = returnCF
-                    root.AssemblyLinearVelocity = Vector3.zero
-
-                    -- Blacklist target object so it is NEVER re-selected immediately
-                    stolenBlacklist[target.Object] = os.clock() + 30
-
-                    -- 6. Yield 0.04s at base for server safe-zone verification (GuardEscapedAt / Egg secured)
-                    task.wait(0.04)
-
-                    -- NOTE: As requested by user:
-                    -- DO NOT drop egg at base (never call DropAlbumRemote)
-                    -- DO NOT check if player is holding egg or wait for hand to clear
-                    -- Immediately proceed to snatch next egg!
-                    setStatus("Secured at Plot! Warping to next egg...")
-
-                    task.wait(0.02)
+                    task.wait(0.2)
                     isStealingActive = false
                 end
             end
-        else
-            if not Config.AutoStealEggs and Config.StealStatus ~= "Idle" then
-                setStatus("Idle")
-            end
+        elseif not Config.AutoStealEggs and Config.StealStatus ~= "Idle" then
+            setStatus("Idle")
         end
     end
 end)
