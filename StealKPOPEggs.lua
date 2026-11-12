@@ -47,7 +47,7 @@ local function safeFireProximityPrompt(prompt)
     local fired = false
     if fireproximityprompt then
         pcall(function()
-            fireproximityprompt(prompt)
+            fireproximityprompt(prompt, 0)
             fired = true
         end)
     end
@@ -55,6 +55,7 @@ local function safeFireProximityPrompt(prompt)
     pcall(function()
         if prompt.InputHoldBegin and prompt.InputHoldEnd then
             prompt:InputHoldBegin()
+            task.wait(0.015)
             prompt:InputHoldEnd()
             fired = true
         end
@@ -356,19 +357,30 @@ local function isCarryingEgg()
 end
 
 local function neutralizeNearbyGuards(targetPos, radius)
-    radius = radius or 45
+    radius = radius or 55
     pcall(function()
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("BasePart") then
-                local pName = obj.Name
-                local mName = obj.Parent and obj.Parent.Name or ""
-                if pName == "GuardRoot" or pName == "RigRoot" or pName:find("Guard") or mName:find("Guard") 
-                   or mName == "Chicken" or mName == "Swan" or mName == "Scorpion" or mName == "Tiger" 
-                   or mName == "Yeti" or mName == "Hellhound" or mName == "Moby" or mName == "T-Rex" 
-                   or mName == "Dragon" or mName:find("fox") or mName:find("Gorilla") or mName:find("Angel") then
-                    if (obj.Position - targetPos).Magnitude <= radius then
-                        obj.CanTouch = false
-                        obj.CanCollide = false
+        local dz = workspace:FindFirstChild("DangerZones")
+        if dz then
+            for _, zone in ipairs(dz:GetChildren()) do
+                for _, desc in ipairs(zone:GetDescendants()) do
+                    if desc:IsA("BasePart") and (desc.Position - targetPos).Magnitude <= radius then
+                        desc.CanTouch = false
+                        desc.CanCollide = false
+                        desc.AssemblyLinearVelocity = Vector3.zero
+                    end
+                end
+            end
+        end
+        for _, model in ipairs(workspace:GetChildren()) do
+            if model:IsA("Model") and model ~= LocalPlayer.Character and not Players:GetPlayerFromCharacter(model) then
+                local hrp = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("GuardRoot") or model.PrimaryPart
+                if hrp and (hrp.Position - targetPos).Magnitude <= radius then
+                    for _, p in ipairs(model:GetDescendants()) do
+                        if p:IsA("BasePart") then
+                            p.CanTouch = false
+                            p.CanCollide = false
+                            p.AssemblyLinearVelocity = Vector3.zero
+                        end
                     end
                 end
             end
@@ -458,15 +470,38 @@ local function isEggObject(obj)
     return false
 end
 
+local stolenBlacklist = {}
+
 -- Comprehensive egg discovery across ALL locations with KG extraction
 local function getAllEggs()
     local results = {}
     local seen = {}
+    local char = LocalPlayer.Character
+    local myPlot = getMyPlot()
 
     local function addTarget(item, zoneOverride, rarityOverride)
         if not item or seen[item] then return end
-        if item:GetAttribute("OwnerUserId") == LocalPlayer.UserId then return end
         seen[item] = true
+
+        -- CRITICAL: Filter out eggs already in our character/hands, backpack, or own plot!
+        if char and item:IsDescendantOf(char) then return end
+        if item:IsDescendantOf(LocalPlayer) then return end
+        if item.Name == "CarriedAlbum" or item.Name == "AlbumCarryControls" then return end
+        if myPlot and item:IsDescendantOf(myPlot) then return end
+        if item:GetAttribute("OwnerUserId") == LocalPlayer.UserId then return end
+        if item:GetAttribute("PersonalOwnerUserId") == LocalPlayer.UserId then return end
+
+        -- Blacklist filter: Ignore recently stolen eggs
+        if stolenBlacklist[item] and os.clock() < stolenBlacklist[item] then return end
+
+        -- Check if egg has a prompt and whether it's enabled
+        local prompt = item:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if not prompt and item:FindFirstChild("CasePart") then
+            prompt = item.CasePart:FindFirstChildWhichIsA("ProximityPrompt", true)
+        end
+        if prompt and not prompt.Enabled then
+            return -- egg is already taken or respawning
+        end
 
         local pivot = (item:IsA("Model") and item:GetPivot())
             or (item:FindFirstChild("CasePart") and item.CasePart.CFrame)
@@ -703,10 +738,11 @@ task.spawn(function()
                     local returnCF = plotCF and (plotCF + Vector3.new(0, 3, 0)) or (root.CFrame)
 
                     -- Neutralize nearby guardian collision and touch detection
-                    neutralizeNearbyGuards(target.Position, 45)
+                    neutralizeNearbyGuards(target.Position, 55)
 
-                    -- 1. Instant warp elevated slightly above ground guardian melee reach (HitDistance is 2.5 - 5 studs)
-                    root.CFrame = target.CFrame + Vector3.new(0, 3.8, 0)
+                    -- 1. Instant warp elevated 4.0 studs above ground guardian melee reach (HitDistance is 2.5 - 5 studs)
+                    root.CFrame = target.CFrame + Vector3.new(0, 4.0, 0)
+                    root.AssemblyLinearVelocity = Vector3.zero
 
                     -- 2. Find ProximityPrompt inside egg or touch fallback
                     local prompt = target.Object:FindFirstChildWhichIsA("ProximityPrompt", true)
@@ -717,7 +753,7 @@ task.spawn(function()
                         end
                     end
 
-                    -- 3. Fire prompt interaction instantly (zero hold duration)
+                    -- 3. Fire prompt interaction instantly with certainty
                     if prompt then
                         safeFireProximityPrompt(prompt)
                     else
@@ -731,20 +767,24 @@ task.spawn(function()
                         end
                     end
 
-                    -- 4. Micro-poll (checks every 0.01s up to max 0.06s)
-                    -- The instant egg is held, break immediately so player is gone before the guard can wake up (GuardWakeSeconds = 0.63s)
-                    for _ = 1, 6 do
-                        if isCarryingEgg() then
+                    -- 4. Micro-poll confirmation: Check if grabbed (held in hand, prompt disabled, or egg moved)
+                    -- Polls every 0.02s up to max 0.2s. The instant grabbed, snaps to base IMMEDIATELY!
+                    for _ = 1, 10 do
+                        local grabbed = isCarryingEgg() 
+                            or (prompt and (not prompt.Parent or not prompt.Enabled)) 
+                            or (not target.Object.Parent or not target.Object:IsDescendantOf(workspace))
+                        if grabbed then
                             break
                         end
-                        if prompt and not prompt.RequiresLineOfSight then
-                            safeFireProximityPrompt(prompt)
-                        end
-                        task.wait(0.01)
+                        task.wait(0.02)
                     end
 
                     -- 5. INSTANT SNAP BACK TO PLOT FLOOR
                     root.CFrame = returnCF
+                    root.AssemblyLinearVelocity = Vector3.zero
+
+                    -- Blacklist target object so it is NEVER re-selected immediately
+                    stolenBlacklist[target.Object] = os.clock() + 30
 
                     -- 6. Yield 0.04s at base for server safe-zone verification (GuardEscapedAt / Egg secured)
                     task.wait(0.04)
