@@ -1,7 +1,7 @@
 --[[
     ═══════════════════════════════════════════════════════════════════════════
        ALEXANDRIA MAIN — STEAL KPOP EGGS ULTIMATE AUTOMATION SUITE
-       Version: 3.4.2 (Local Character Visibility Toggle)
+       Version: 3.5.0 (Named Presets + Startup Preset Lock)
        Note: Remote argument formats and game-specific attributes require live verification.
        Design: Faithful Recreation of Alexandria Hub Layout & Features
        Target Game: Steal KPOP Eggs
@@ -310,6 +310,110 @@ local Config = {
 }
 
 ---------------------------------------------------------------------------
+-- NAMED PRESET STORAGE (executor filesystem + session fallback)
+---------------------------------------------------------------------------
+local PRESET_FOLDER = "Alexandria_Presets"
+local PINNED_PRESET_FILE = PRESET_FOLDER .. "/active_preset.txt"
+local PRESET_MEMORY = (getgenv and getgenv().AlexandriaPresets) or {}
+if getgenv then getgenv().AlexandriaPresets = PRESET_MEMORY end
+
+local function sanitizePresetName(name)
+    if type(name) ~= "string" then return nil end
+    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+    name = name:gsub("[^%w%-%_ ]", ""):gsub("%s+", "_")
+    if #name < 1 or #name > 40 then return nil end
+    return name
+end
+
+local function ensurePresetFolder()
+    if type(isfolder) == "function" and type(makefolder) == "function" then
+        local ok, exists = pcall(isfolder, PRESET_FOLDER)
+        if ok and not exists then pcall(makefolder, PRESET_FOLDER) end
+    end
+end
+
+local function getPresetPath(name)
+    return PRESET_FOLDER .. "/" .. name .. ".json"
+end
+
+local function getPresetConfigTypes()
+    return {
+        AutoStealEggs="boolean", SnipeAdminEggs="boolean", StealZoneFilters="table",
+        StealRarityFilters="table", StealPriority="string", AutoPlaceEggs="boolean",
+        PlaceRarityFilters="table", AutoHatch="boolean", AutoEquipBest="boolean",
+        AutoGoOnTreadmill="boolean", AutoUpgradeTreadmill="boolean", AutoUpgradeBase="boolean",
+        AutoClaimIndex="boolean", AutoClaimDaily="boolean", AutoBuyTrail="boolean",
+        AutoBuyCosmetics="boolean", EggESP="boolean", ESPRarityFilters="table",
+        AntiRagdoll="boolean", AntiAFK="boolean", InvisibleCharacter="boolean",
+        SafeTravelMode="boolean", TweenSpeed="number", HumanizeDelays="boolean",
+        SelectedTeleportZone="string"
+    }
+end
+
+local function applyPresetConfig(loadedConfig)
+    if type(loadedConfig) ~= "table" then return false, "Invalid preset data" end
+    local allowedTypes = getPresetConfigTypes()
+    for key, expectedType in pairs(allowedTypes) do
+        local value = loadedConfig[key]
+        if value ~= nil and type(value) == expectedType then
+            if key == "StealPriority" then
+                if value == "Nearest" or value == "Biggest" or value == "Random" then Config[key] = value end
+            elseif key == "TweenSpeed" then
+                Config[key] = math.clamp(value, 10, 250)
+            elseif key == "SelectedTeleportZone" then
+                if table.find(ZONES, value) then Config[key] = value end
+            elseif key == "StealZoneFilters" or key == "StealRarityFilters" or key == "PlaceRarityFilters" or key == "ESPRarityFilters" then
+                local cleaned = {}
+                local validOptions = (key == "StealZoneFilters") and ZONES or RARITIES
+                for _, option in ipairs(validOptions) do
+                    if value[option] == true then cleaned[option] = true end
+                end
+                Config[key] = cleaned
+            else
+                Config[key] = value
+            end
+        end
+    end
+    return true
+end
+
+local function readPresetByName(name)
+    local path = getPresetPath(name)
+    if type(readfile) == "function" and type(isfile) == "function" then
+        local ok, exists = pcall(isfile, path)
+        if ok and exists then return readfile(path) end
+    end
+    return PRESET_MEMORY[name]
+end
+
+local function loadPresetByName(name)
+    local content = readPresetByName(name)
+    if type(content) ~= "string" then return false, "Preset not found: " .. name end
+    local ok, decoded = pcall(function() return HttpService:JSONDecode(content) end)
+    if not ok then return false, "Preset JSON is corrupted" end
+    return applyPresetConfig(decoded)
+end
+
+-- Restore the pinned preset before background workers start.
+do
+    local pinnedName
+    if type(readfile) == "function" and type(isfile) == "function" then
+        local ok, exists = pcall(isfile, PINNED_PRESET_FILE)
+        if ok and exists then
+            local readOk, value = pcall(readfile, PINNED_PRESET_FILE)
+            if readOk then pinnedName = sanitizePresetName(value) end
+        end
+    end
+    if not pinnedName and getgenv then
+        pinnedName = sanitizePresetName(getgenv().AlexandriaPinnedPreset)
+    end
+    if pinnedName then
+        local loaded, err = loadPresetByName(pinnedName)
+        if not loaded then warn("[Alexandria] Could not load pinned preset: " .. tostring(err)) end
+    end
+end
+
+---------------------------------------------------------------------------
 -- HELPER FUNCTIONS
 ---------------------------------------------------------------------------
 local function getDelay(baseDelay)
@@ -420,6 +524,13 @@ local function setCharacterInvisible(enabled)
     else
         applyCharacterInvisibility(character, false)
     end
+end
+
+-- Apply the startup preset's invisibility setting after its implementation exists.
+if Config.InvisibleCharacter then
+    task.defer(function()
+        if Running then setCharacterInvisible(true) end
+    end)
 end
 
 CharacterAddedVisibilityConnection = LocalPlayer.CharacterAdded:Connect(function(character)
@@ -2358,69 +2469,115 @@ SettingsLayout.Padding = UDim.new(0, 10)
 SettingsLayout.Parent = SettingsTab
 
 local PresetCard = createCard(SettingsTab, "Configuration Presets", "💾")
-local PRESET_FILE = "Alexandria_StealKPOPEggs_Config.json"
+local PRESET_NAME = "Alexandria_Presets"
+local selectedPresetName = "MyPreset"
 
-local function savePreset()
-    local success, err = pcall(function()
+local presetNameLabel = Instance.new("TextLabel")
+presetNameLabel.Size = UDim2.new(1, 0, 0, 16)
+presetNameLabel.BackgroundTransparency = 1
+presetNameLabel.Font = Enum.Font.Gotham
+presetNameLabel.TextSize = 12
+presetNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+presetNameLabel.TextColor3 = Color3.fromRGB(140, 145, 165)
+presetNameLabel.Text = "Preset name (use the same name to overwrite)"
+presetNameLabel.Parent = PresetCard
+
+local presetNameBox = Instance.new("TextBox")
+presetNameBox.Size = UDim2.new(1, 0, 0, 32)
+presetNameBox.BackgroundColor3 = Color3.fromRGB(24, 26, 35)
+presetNameBox.BorderSizePixel = 0
+presetNameBox.Font = Enum.Font.Gotham
+presetNameBox.TextSize = 12
+presetNameBox.TextColor3 = Color3.fromRGB(230, 235, 245)
+presetNameBox.PlaceholderColor3 = Color3.fromRGB(120, 125, 145)
+presetNameBox.PlaceholderText = "Enter preset name..."
+presetNameBox.Text = selectedPresetName
+presetNameBox.ClearTextOnFocus = false
+presetNameBox.Parent = PresetCard
+local presetBoxCorner = Instance.new("UICorner")
+presetBoxCorner.CornerRadius = UDim.new(0, 5)
+presetBoxCorner.Parent = presetNameBox
+local presetBoxStroke = Instance.new("UIStroke")
+presetBoxStroke.Color = Color3.fromRGB(38, 42, 56)
+presetBoxStroke.Thickness = 1
+presetBoxStroke.Parent = presetNameBox
+
+local function currentPresetName()
+    local name = sanitizePresetName(presetNameBox.Text)
+    if not name then
+        setStatus("Enter a valid preset name (1-40 characters).")
+        return nil
+    end
+    selectedPresetName = name
+    return name
+end
+
+local function saveNamedPreset()
+    local name = currentPresetName()
+    if not name then return end
+    local ok, err = pcall(function()
         local data = HttpService:JSONEncode(Config)
-        if writefile then
-            writefile(PRESET_FILE, data)
-        else
-            getgenv().AlexandriaSavedPreset = data
+        PRESET_MEMORY[name] = data
+        ensurePresetFolder()
+        if type(writefile) == "function" then
+            writefile(getPresetPath(name), data)
+        elseif not getgenv then
+            error("Executor file APIs are unavailable; preset can only persist for this session")
         end
     end)
-    if success then
-        setStatus("Preset Saved successfully to file!")
+    if ok then
+        setStatus("Saved preset: " .. name)
     else
-        setStatus("Failed to save preset: " .. tostring(err))
+        setStatus("Could not save preset: " .. tostring(err))
     end
 end
 
-local function loadPreset()
-    local success, content = pcall(function()
-        if readfile and isfile and isfile(PRESET_FILE) then
-            return readfile(PRESET_FILE)
-        elseif getgenv and getgenv().AlexandriaSavedPreset then
-            return getgenv().AlexandriaSavedPreset
-        end
-        error("No preset file found!")
-    end)
-    if success and content then
-        local decodeSuccess, loadedConfig = pcall(function()
-            return HttpService:JSONDecode(content)
-        end)
-        if decodeSuccess and type(loadedConfig) == "table" then
-            local allowedTypes = {
-                AutoStealEggs="boolean", SnipeAdminEggs="boolean", StealZoneFilters="table",
-                StealRarityFilters="table", StealPriority="string", AutoPlaceEggs="boolean",
-                PlaceRarityFilters="table", AutoHatch="boolean", AutoEquipBest="boolean",
-                AutoGoOnTreadmill="boolean", AutoUpgradeTreadmill="boolean", AutoUpgradeBase="boolean",
-                AutoClaimIndex="boolean", AutoClaimDaily="boolean", AutoBuyTrail="boolean",
-                AutoBuyCosmetics="boolean", EggESP="boolean", ESPRarityFilters="table",
-                AntiRagdoll="boolean", AntiAFK="boolean", SafeTravelMode="boolean",
-                TweenSpeed="number", HumanizeDelays="boolean", SelectedTeleportZone="string"
-            }
-            for key, expectedType in pairs(allowedTypes) do
-                local value = loadedConfig[key]
-                if value ~= nil and type(value) == expectedType then
-                    if key == "StealPriority" then
-                        if value == "Nearest" or value == "Biggest" or value == "Random" then Config[key] = value end
-                    elseif key == "TweenSpeed" then
-                        Config[key] = math.clamp(value, 10, 250)
-                    elseif key == "SelectedTeleportZone" then
-                        if table.find(ZONES, value) then Config[key] = value end
-                    else
-                        Config[key] = value
-                    end
-                end
-            end
-            setStatus("Preset loaded (validated). Some UI controls may need reopening to refresh their display.")
-        else
-            setStatus("Failed: Preset data corrupted!")
-        end
+local function loadNamedPreset()
+    local name = currentPresetName()
+    if not name then return end
+    local ok, err = loadPresetByName(name)
+    if ok then
+        if Config.InvisibleCharacter ~= nil then setCharacterInvisible(Config.InvisibleCharacter) end
+        setStatus("Loaded preset: " .. name .. ". Some existing UI controls may need reopening to refresh.")
     else
-        setStatus("No saved preset file found!")
+        setStatus(tostring(err))
     end
+end
+
+local function pinNamedPreset()
+    local name = currentPresetName()
+    if not name then return end
+    local content = readPresetByName(name)
+    if type(content) ~= "string" then
+        setStatus("Save this preset first, then set it as the startup preset.")
+        return
+    end
+    local ok, err = pcall(function()
+        ensurePresetFolder()
+        if type(writefile) == "function" then
+            writefile(PINNED_PRESET_FILE, name)
+        elseif getgenv then
+            getgenv().AlexandriaPinnedPreset = name
+        else
+            error("Persistent storage is unavailable")
+        end
+    end)
+    if ok then
+        if getgenv then getgenv().AlexandriaPinnedPreset = name end
+        setStatus("Startup preset locked: " .. name)
+    else
+        setStatus("Could not set startup preset: " .. tostring(err))
+    end
+end
+
+local function unpinPreset()
+    pcall(function()
+        if type(isfile) == "function" and type(delfile) == "function" and isfile(PINNED_PRESET_FILE) then
+            delfile(PINNED_PRESET_FILE)
+        end
+    end)
+    if getgenv then getgenv().AlexandriaPinnedPreset = nil end
+    setStatus("Startup preset unlocked. Default settings will be used next launch.")
 end
 
 local function resetDefaults()
@@ -2444,16 +2601,19 @@ local function resetDefaults()
     Config.ESPRarityFilters = getDefaultRarityTable()
     Config.AntiRagdoll = true
     Config.AntiAFK = true
+    Config.InvisibleCharacter = false
     setCharacterInvisible(false)
     Config.SafeTravelMode = false
     Config.TweenSpeed = 80
     Config.HumanizeDelays = false
     Config.SelectedTeleportZone = "FOREST"
-    setStatus("Settings reset to defaults. Re-open the UI if a control still shows an old visual state.")
+    setStatus("Settings reset to defaults. Save as a preset if you want to keep these settings.")
 end
 
-createButton(PresetCard, "💾 Save Current Preset", savePreset)
-createButton(PresetCard, "📂 Load Saved Preset", loadPreset)
+createButton(PresetCard, "💾 Save / Overwrite This Preset", saveNamedPreset)
+createButton(PresetCard, "📂 Load This Preset", loadNamedPreset)
+createButton(PresetCard, "🔒 Set As Startup Preset", pinNamedPreset)
+createButton(PresetCard, "🔓 Unlock Startup Preset", unpinPreset)
 createButton(PresetCard, "🔄 Reset to Default Settings", resetDefaults)
 
 local GeneralSettings = createCard(SettingsTab, "General Settings", "⚙")
