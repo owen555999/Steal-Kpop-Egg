@@ -1,3 +1,12 @@
+--[[
+    ═══════════════════════════════════════════════════════════════════════════
+       ALEXANDRIA MAIN — STEAL KPOP EGGS ULTIMATE AUTOMATION SUITE
+       Version: 3.2.0 (Enhanced Edition)
+       Design: Faithful Recreation of Alexandria Hub Layout & Features
+       Target Game: Steal KPOP Eggs
+    ═══════════════════════════════════════════════════════════════════════════
+]]
+
 ---------------------------------------------------------------------------
 -- SERVICES & LOCAL REFERENCES
 ---------------------------------------------------------------------------
@@ -36,10 +45,7 @@ local function safeFireProximityPrompt(prompt)
     local fired = false
     if fireproximityprompt then
         pcall(function()
-            fireproximityprompt(prompt, 0, false)
-            fireproximityprompt(prompt, 0, true)
-            task.wait(prompt.HoldDuration or 0)
-            fireproximityprompt(prompt, 0, false)
+            fireproximityprompt(prompt)
             fired = true
         end)
     end
@@ -47,7 +53,7 @@ local function safeFireProximityPrompt(prompt)
     if not fired and prompt.InputHoldBegin and prompt.InputHoldEnd then
         pcall(function()
             prompt:InputHoldBegin()
-            task.wait(prompt.HoldDuration or 0)
+            task.wait(prompt.HoldDuration or 0.1)
             prompt:InputHoldEnd()
             fired = true
         end)
@@ -61,7 +67,7 @@ local function safeFireProximityPrompt(prompt)
 end
 
 ---------------------------------------------------------------------------
--- GAME REMOTES & REFERENCES (Discovered from Client Dump)
+-- GAME REMOTES & REFERENCES
 ---------------------------------------------------------------------------
 local CasePlacementFolder   = ReplicatedStorage:WaitForChild("CasePlacement", 10)
 local PlaceRemote           = CasePlacementFolder and CasePlacementFolder:WaitForChild("Place", 10)
@@ -171,21 +177,34 @@ local TRAIL_LIST = {
     { Id = "divine",   Cost = 300000000000 }
 }
 
+-- Default Table Generators
+local function getDefaultZoneTable()
+    local t = {}
+    for _, z in ipairs(ZONES) do t[z] = true end
+    return t
+end
+
+local function getDefaultRarityTable()
+    local t = {}
+    for _, r in ipairs(RARITIES) do t[r] = true end
+    return t
+end
+
 ---------------------------------------------------------------------------
 -- CONFIGURATION & STATE
 ---------------------------------------------------------------------------
 local Config = {
     -- Auto Steal Eggs
     AutoStealEggs       = false,
-    SnipeAdminEggs      = false, -- Dedicated Admin & Exclusive Egg Global Sniper
-    StealZoneFilters    = { ["CELESTIAL"] = true, ["COSMIC"] = true },
-    StealRarityFilters  = { ["Common"] = true, ["Uncommon"] = true, ["Rare"] = true, ["Epic"] = true, ["Legendary"] = true, ["Mythic"] = true, ["Cosmic"] = true, ["Secret"] = true, ["Eternal"] = true, ["Divine"] = true, ["Exclusive"] = true, ["Admin"] = true },
+    SnipeAdminEggs      = true, -- Prioritize Admin & Exclusive Eggs across entire world
+    StealZoneFilters    = getDefaultZoneTable(), -- All zones active by default
+    StealRarityFilters  = getDefaultRarityTable(), -- All rarities active by default
     StealPriority       = "Nearest", -- "Nearest", "Biggest", "Random"
     StealStatus         = "Idle",
 
     -- Eggs (Plot)
     AutoPlaceEggs       = false,
-    PlaceRarityFilters  = { ["Common"] = true, ["Uncommon"] = true, ["Rare"] = true, ["Epic"] = true, ["Legendary"] = true, ["Mythic"] = true, ["Cosmic"] = true, ["Secret"] = true, ["Eternal"] = true, ["Divine"] = true, ["Exclusive"] = true, ["Admin"] = true },
+    PlaceRarityFilters  = getDefaultRarityTable(),
     AutoHatch           = false,
     AutoEquipBest       = false,
 
@@ -202,13 +221,13 @@ local Config = {
 
     -- Egg ESP
     EggESP              = false,
-    ESPRarityFilters    = { ["Common"] = true, ["Uncommon"] = true, ["Rare"] = true, ["Epic"] = true, ["Legendary"] = true, ["Mythic"] = true, ["Cosmic"] = true, ["Secret"] = true, ["Eternal"] = true, ["Divine"] = true, ["Exclusive"] = true, ["Admin"] = true },
+    ESPRarityFilters    = getDefaultRarityTable(),
 
     -- Extra Systems
     AutoClaimFreeGift   = false,
     AntiRagdoll         = true,
     AutoBatAura         = false,
-    InvisibleGhost      = false,
+    InvisibleGhost      = false, -- True FE Server Invisibility
     GuardESP            = false,
     PlayerESP           = false,
     AutoSellJunk        = false,
@@ -216,13 +235,12 @@ local Config = {
     CustomSpeedEnabled  = false,
     InfiniteJump        = false,
     Noclip              = false,
-    FlyEnabled          = false,
     AntiAFK             = true,
 
-    -- Anti-Detect & Stealth Settings
-    SafeTravelMode      = true, -- Smooth tween movement instead of instant CFrame to bypass server speed checks
-    TweenSpeed          = 65,   -- Studs per second (natural speed matching in-game speed buffs)
-    HumanizeDelays      = true, -- Add randomized jitter to remote calls to mimic human input
+    -- Movement mode
+    SafeTravelMode      = false, -- Instant warp by default
+    TweenSpeed          = 80,
+    HumanizeDelays      = false,
 
     -- Teleport Target Zone
     SelectedTeleportZone = "FOREST"
@@ -254,7 +272,9 @@ local function getPlayerPlot()
     if not bases then return nil end
     local myPlotId = LocalPlayer:GetAttribute("PlotId")
     for _, base in ipairs(bases:GetChildren()) do
-        if base:GetAttribute("OwnerUserId") == LocalPlayer.UserId or (myPlotId and base:GetAttribute("BaseId") == myPlotId) then
+        if base:GetAttribute("OwnerUserId") == LocalPlayer.UserId 
+           or base:GetAttribute("Owner") == LocalPlayer.Name 
+           or (myPlotId and (base:GetAttribute("BaseId") == myPlotId or base.Name == tostring(myPlotId))) then
             return base
         end
     end
@@ -269,6 +289,9 @@ local function getPlotFloorPosition()
     if foundation then
         return foundation.Position, foundation.CFrame, foundation.Size
     end
+    if plot.PrimaryPart then
+        return plot.PrimaryPart.Position, plot.PrimaryPart.CFrame, plot.PrimaryPart.Size
+    end
     return plot:GetPivot().Position, plot:GetPivot(), Vector3.new(20, 2, 20)
 end
 
@@ -276,11 +299,13 @@ local function isCarryingEgg()
     if LocalPlayer:GetAttribute("CloudGuardChasing") == true then return true end
     local char = getCharacter()
     if not char then return false end
+    if char:FindFirstChild("CarriedAlbum") ~= nil then return true end
     for _, item in ipairs(char:GetChildren()) do
-        if item:IsA("Tool") and (item:GetAttribute("IsPhotocard") == true or item:GetAttribute("CasePlacementTool") == true or item:GetAttribute("AlbumZone") ~= nil or item.Name:find("Egg") or item.Name:find("Album")) then
-            return true
-        end
-        if item.Name == "Stolen Egg" or item.Name == "Stolen Album" then
+        if item:IsA("Tool") and (item:GetAttribute("IsPhotocard") == true 
+           or item:GetAttribute("CasePlacementTool") == true 
+           or item:GetAttribute("AlbumZone") ~= nil 
+           or item.Name:find("Egg") or item.Name:find("Album") 
+           or item.Name:find("Stolen")) then
             return true
         end
     end
@@ -300,14 +325,14 @@ local function getEggZone(egg)
             end
         end
     end
+    if egg:IsDescendantOf(workspace:FindFirstChild("PlayerBases") or workspace) then
+        return "BASE"
+    end
     return "UNKNOWN"
 end
 
 local function getEggSize(eggObj)
-    if not eggObj then return 1 end
-    local kg = eggObj:GetAttribute("AlbumWeightKg")
-    if type(kg) == "number" then return kg end
-    local sz = eggObj:GetAttribute("AlbumSize")
+    local sz = eggObj:GetAttribute("AlbumSize") or eggObj:GetAttribute("Size")
     if type(sz) == "number" then return sz end
     if eggObj:IsA("Model") then
         local cf, size = eggObj:GetBoundingBox()
@@ -336,7 +361,7 @@ local function getEggRarity(egg)
     local r = egg:GetAttribute("RarityAura") or egg:GetAttribute("AlbumRarity") or egg:GetAttribute("Rarity")
     if r and RARITY_TIERS[r] then return r end
     
-    -- Check billboard or title
+    -- Check billboard label
     local label = egg:FindFirstChild("AlbumWeightLabel", true)
     if label and label:IsA("BillboardGui") then
         local text = label:FindFirstChildWhichIsA("TextLabel", true)
@@ -350,135 +375,160 @@ local function getEggRarity(egg)
     return "Common"
 end
 
-local function getAdminAndExclusiveEggs()
-    local results = {}
-    local seen = {}
-
-    local function addTarget(obj, isAdm)
-        if not obj or seen[obj] then return end
-        if obj:GetAttribute("OwnerUserId") == LocalPlayer.UserId then return end
-        seen[obj] = true
-
-        local pivot = (obj:IsA("Model") and obj:GetPivot()) 
-            or (obj:FindFirstChild("Handle") and obj.Handle.CFrame) 
-            or (obj:GetAttribute("Ground") and CFrame.new(obj:GetAttribute("Ground"))) 
-            or (obj:IsA("BasePart") and obj.CFrame)
-            or (obj:FindFirstChildWhichIsA("BasePart") and obj:FindFirstChildWhichIsA("BasePart").CFrame)
-            
-        if not pivot then return end
-        local rName = isAdm and "Admin" or "Exclusive"
-        table.insert(results, {
-            Object = obj,
-            Position = pivot.Position,
-            Zone = "GLOBAL",
-            Rarity = rName,
-            Tier = RARITY_TIERS[rName] or 12,
-            Name = isAdm and "Admin Egg" or "Exclusive Egg"
-        })
-    end
-
-    -- 1. Scan workspace.AdminEggHuntDrops
-    local drops = workspace:FindFirstChild("AdminEggHuntDrops")
-    if drops then
-        for _, drop in ipairs(drops:GetChildren()) do
-            addTarget(drop, true)
-        end
-    end
-
-    -- 2. Scan whole workspace for Admin / Exclusive drops
-    for _, desc in ipairs(workspace:GetDescendants()) do
-        if desc:IsA("Model") or desc:IsA("Tool") then
-            if desc:GetAttribute("AdminHuntEgg") == true or desc.Name == "AdminEgg" then
-                addTarget(desc, true)
-            elseif desc:GetAttribute("SetId") and tostring(desc:GetAttribute("SetId")):lower():find("admin") then
-                addTarget(desc, true)
-            elseif desc:GetAttribute("ExclusiveSetId") ~= nil or (desc:GetAttribute("SetId") and tostring(desc:GetAttribute("SetId")):lower():find("exclusive")) then
-                addTarget(desc, false)
-            end
-        end
-    end
-
-    return results
-end
-
 local function isEggObject(obj)
     if not (obj:IsA("Model") or obj:IsA("Tool")) then return false end
     if obj:GetAttribute("PreviewOnly") == true then return false end
-    if obj:GetAttribute("RarityAura") ~= nil or obj:GetAttribute("CasePlacementTool") == true or obj:GetAttribute("AlbumRarity") ~= nil or obj:GetAttribute("AdminHuntEgg") == true then
+    if obj:GetAttribute("RarityAura") ~= nil 
+       or obj:GetAttribute("CasePlacementTool") == true 
+       or obj:GetAttribute("AlbumRarity") ~= nil 
+       or obj:GetAttribute("AdminHuntEgg") == true 
+       or obj:GetAttribute("ProductionEgg") == true 
+       or obj:GetAttribute("EggId") ~= nil then
         return true
     end
-    if obj:FindFirstChild("CasePart") ~= nil then return true end
+    if obj:FindFirstChild("CasePart") ~= nil or obj:FindFirstChild("AlbumWeightLabel") ~= nil then return true end
     if obj.Name:find("Egg") or obj.Name:find("Album") then return true end
+    local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt and (prompt.ActionText:find("Steal") or prompt.ActionText:find("Take") or prompt.ActionText:find("Pick") or prompt.ObjectText:find("Egg") or prompt.ObjectText:find("Album")) then
+        return true
+    end
     return false
 end
 
-local function getAllEligibleEggs()
+-- Comprehensive egg discovery across ALL locations
+local function getAllEggs()
     local results = {}
-    local dz = workspace:FindFirstChild("DangerZones")
-    local adminDrops = workspace:FindFirstChild("AdminEggHuntDrops")
+    local seen = {}
 
-    local function checkAndAdd(item)
-        if isEggObject(item) then
-            -- Verify it is not our own incubating egg
-            if item:GetAttribute("OwnerUserId") == LocalPlayer.UserId then return end
-            
-            local zone = getEggZone(item)
-            local rarity = getEggRarity(item)
-            
-            -- Filter check
-            local zonePass = false
-            if next(Config.StealZoneFilters) == nil then
-                zonePass = true
-            else
-                for z, active in pairs(Config.StealZoneFilters) do
-                    if active and (zone:find(z) or z:find(zone)) then
-                        zonePass = true
-                        break
+    local function addTarget(item, zoneOverride, rarityOverride)
+        if not item or seen[item] then return end
+        if item:GetAttribute("OwnerUserId") == LocalPlayer.UserId then return end
+        seen[item] = true
+
+        local pivot = (item:IsA("Model") and item:GetPivot())
+            or (item:FindFirstChild("CasePart") and item.CasePart.CFrame)
+            or (item:FindFirstChild("Handle") and item.Handle.CFrame)
+            or (item:GetAttribute("Ground") and CFrame.new(item:GetAttribute("Ground")))
+            or (item:IsA("BasePart") and item.CFrame)
+            or (item:FindFirstChildWhichIsA("BasePart") and item:FindFirstChildWhichIsA("BasePart").CFrame)
+
+        if not pivot then return end
+
+        local rarity = rarityOverride or getEggRarity(item)
+        local zone = zoneOverride or getEggZone(item)
+        local name = item:GetAttribute("EggName") or item:GetAttribute("AlbumType") or item.Name
+
+        table.insert(results, {
+            Object   = item,
+            Position = pivot.Position,
+            CFrame   = pivot,
+            Zone     = zone,
+            Rarity   = rarity,
+            Tier     = RARITY_TIERS[rarity] or 1,
+            Name     = name
+        })
+    end
+
+    -- 1. Admin Egg Hunt Drops
+    local adminDrops = workspace:FindFirstChild("AdminEggHuntDrops")
+    if adminDrops then
+        for _, drop in ipairs(adminDrops:GetChildren()) do
+            addTarget(drop, "GLOBAL", "Admin")
+        end
+    end
+
+    -- 2. Exclusive Placed Eggs
+    local excDrops = workspace:FindFirstChild("ExclusivePlacedEggs")
+    if excDrops then
+        for _, drop in ipairs(excDrops:GetChildren()) do
+            addTarget(drop, "GLOBAL", "Exclusive")
+        end
+    end
+
+    -- 3. Danger Zones (All zones)
+    local dz = workspace:FindFirstChild("DangerZones")
+    if dz then
+        for _, zoneFolder in ipairs(dz:GetChildren()) do
+            local zName = string.upper(tostring(zoneFolder:GetAttribute("ZoneName") or zoneFolder.Name))
+            for _, desc in ipairs(zoneFolder:GetDescendants()) do
+                if isEggObject(desc) then
+                    addTarget(desc, zName)
+                end
+            end
+        end
+    end
+
+    -- 4. Other Players' Bases (PlayerBases)
+    local bases = workspace:FindFirstChild("PlayerBases")
+    if bases then
+        for _, base in ipairs(bases:GetChildren()) do
+            if base:GetAttribute("OwnerUserId") ~= LocalPlayer.UserId then
+                for _, desc in ipairs(base:GetDescendants()) do
+                    if isEggObject(desc) then
+                        addTarget(desc, "BASE")
                     end
                 end
             end
-            
-            local rarityPass = false
-            if next(Config.StealRarityFilters) == nil then
-                rarityPass = true
-            elseif Config.StealRarityFilters[rarity] == true then
-                rarityPass = true
-            end
-            
-            if zonePass and rarityPass then
-                local pivot = item:IsA("Model") and item:GetPivot() or (item:FindFirstChild("Handle") and item.Handle.CFrame) or item:GetPivot()
-                table.insert(results, {
-                    Object = item,
-                    Position = pivot.Position,
-                    Zone = zone,
-                    Rarity = rarity,
-                    Tier = RARITY_TIERS[rarity] or 1,
-                    Name = item:GetAttribute("EggName") or item.Name
-                })
-            end
         end
     end
 
-    if dz then
-        for _, desc in ipairs(dz:GetDescendants()) do
-            if desc:IsA("Model") and (desc.Parent.Name == "CloudGuardArea" or desc.Name:find("Egg") or desc.Name:find("Album")) then
-                checkAndAdd(desc)
+    -- 5. Global workspace scan for admin/exclusive tagged eggs
+    for _, desc in ipairs(workspace:GetDescendants()) do
+        if desc:IsA("Model") or desc:IsA("Tool") then
+            if desc:GetAttribute("AdminHuntEgg") == true or desc.Name == "AdminEgg" then
+                addTarget(desc, "GLOBAL", "Admin")
+            elseif desc:GetAttribute("ExclusiveSetId") ~= nil then
+                addTarget(desc, "GLOBAL", "Exclusive")
             end
-        end
-    end
-
-    if adminDrops then
-        for _, drop in ipairs(adminDrops:GetChildren()) do
-            checkAndAdd(drop)
         end
     end
 
     return results
 end
 
-local function safeWait(baseSec)
-    local jitter = Config.HumanizeDelays and (math.random() * 0.12) or 0
-    task.wait((baseSec or 0.2) + jitter)
+local function getAdminAndExclusiveEggs()
+    local all = getAllEggs()
+    local adminEggs = {}
+    for _, egg in ipairs(all) do
+        if egg.Rarity == "Admin" or egg.Rarity == "Exclusive" or egg.Zone == "GLOBAL" then
+            table.insert(adminEggs, egg)
+        end
+    end
+    return adminEggs
+end
+
+local function getAllEligibleEggs()
+    local all = getAllEggs()
+    local filtered = {}
+
+    for _, egg in ipairs(all) do
+        local zonePass = false
+        if next(Config.StealZoneFilters) == nil then
+            zonePass = true
+        elseif egg.Zone == "GLOBAL" or egg.Zone == "BASE" then
+            zonePass = true
+        else
+            for z, active in pairs(Config.StealZoneFilters) do
+                if active and (egg.Zone:find(z) or z:find(egg.Zone)) then
+                    zonePass = true
+                    break
+                end
+            end
+        end
+
+        local rarityPass = false
+        if next(Config.StealRarityFilters) == nil then
+            rarityPass = true
+        elseif Config.StealRarityFilters[egg.Rarity] == true then
+            rarityPass = true
+        end
+
+        if zonePass and rarityPass then
+            table.insert(filtered, egg)
+        end
+    end
+
+    return filtered
 end
 
 local function teleportTo(cframeOrPos, forceInstant)
@@ -491,15 +541,14 @@ local function teleportTo(cframeOrPos, forceInstant)
         return
     end
 
-    -- Safe Mode: Smooth Tween with Collision disabled to pass server checks cleanly
     local dist = (root.Position - targetCF.Position).Magnitude
     if dist <= 8 then
         root.CFrame = targetCF
         return
     end
 
-    local speed = Config.TweenSpeed or 65
-    local duration = math.clamp(dist / speed, 0.2, 5.0)
+    local speed = Config.TweenSpeed or 80
+    local duration = math.clamp(dist / speed, 0.2, 4.0)
     local tween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = targetCF })
     tween:Play()
     tween.Completed:Wait()
@@ -508,7 +557,7 @@ end
 ---------------------------------------------------------------------------
 -- STATUS NOTIFICATION HELPER
 ---------------------------------------------------------------------------
-local updateUIStatus -- Forward declaration
+local updateUIStatus
 
 local function setStatus(text)
     Config.StealStatus = text
@@ -518,10 +567,10 @@ local function setStatus(text)
 end
 
 ---------------------------------------------------------------------------
--- CORE ENGINE THREADS / SERVICES
+-- CORE ENGINE SERVICES
 ---------------------------------------------------------------------------
 
--- 1. AUTO STEAL EGGS SERVICE
+-- 1. AUTO STEAL EGGS SERVICE (Direct Warp To Egg -> Collect -> Direct Warp To Plot)
 task.spawn(function()
     while true do
         task.wait(0.2)
@@ -532,15 +581,14 @@ task.spawn(function()
                 continue
             end
 
-            -- Check if already holding stolen loot
+            -- If currently carrying stolen egg, warp back to plot
             if isCarryingEgg() then
-                setStatus("Securing Egg: Returning to Plot...")
-                local plotPos, plotCF = getPlotFloorPosition()
+                setStatus("Securing Egg: Warping to Plot...")
+                local _, plotCF = getPlotFloorPosition()
                 if plotCF then
-                    teleportTo(plotCF + Vector3.new(0, 3, 0))
-                    task.wait(1.2)
-                    -- Wait until safe or until egg is dropped / placed
-                    for _ = 1, 20 do
+                    root.CFrame = plotCF + Vector3.new(0, 3, 0)
+                    task.wait(0.8)
+                    for _ = 1, 15 do
                         if not isCarryingEgg() then break end
                         task.wait(0.2)
                     end
@@ -551,7 +599,7 @@ task.spawn(function()
             else
                 local eggs = {}
 
-                -- Priority Check: Dedicated Admin & Exclusive Global Sniper
+                -- Dedicated Admin & Exclusive Global Sniper Check
                 if Config.SnipeAdminEggs then
                     local adminEggs = getAdminAndExclusiveEggs()
                     if #adminEggs > 0 then
@@ -560,20 +608,17 @@ task.spawn(function()
                     end
                 end
 
-                -- If no admin eggs found, scan standard matching eggs
                 if #eggs == 0 then
-                    setStatus("Scanning for matching eggs...")
                     eggs = getAllEligibleEggs()
                 end
 
                 if #eggs == 0 then
                     setStatus("No matching eggs found. Waiting...")
-                    task.wait(1.5)
+                    task.wait(0.8)
                 else
                     local myPos = root.Position
                     local target = nil
 
-                    -- Sort eggs by Priority: Nearest, Biggest, Random
                     if Config.StealPriority == "Biggest" then
                         table.sort(eggs, function(a, b)
                             local szA = getEggSize(a.Object)
@@ -592,12 +637,13 @@ task.spawn(function()
                         end)
                         target = eggs[1]
                     end
+
                     if target and target.Object and target.Object.Parent then
-                        setStatus("Stealing " .. tostring(target.Name) .. " (" .. target.Rarity .. ")...")
+                        setStatus("Warping to " .. tostring(target.Name) .. " (" .. target.Rarity .. ")...")
                         
-                        -- Teleport close to egg
-                        teleportTo(target.Position + Vector3.new(0, 2, 0))
-                        task.wait(0.15)
+                        -- Direct instant CFrame warp to egg
+                        root.CFrame = target.CFrame + Vector3.new(0, 2, 0)
+                        task.wait(0.12)
 
                         -- Find ProximityPrompt inside egg
                         local prompt = target.Object:FindFirstChildWhichIsA("ProximityPrompt", true)
@@ -610,26 +656,23 @@ task.spawn(function()
 
                         if prompt then
                             safeFireProximityPrompt(prompt)
-                            task.wait(0.3)
+                            task.wait(0.25)
                         else
-                            -- Touch contact fallback
                             local part = target.Object:FindFirstChildWhichIsA("BasePart", true)
-                            if part and root then
+                            if part and root and firetouchinterest then
                                 firetouchinterest(root, part, 0)
-                                task.wait(0.1)
+                                task.wait(0.05)
                                 firetouchinterest(root, part, 1)
                             end
                         end
 
-                        -- Quick check if acquired
-                        if isCarryingEgg() then
-                            setStatus("Egg acquired! Teleporting home...")
-                            local _, plotCF = getPlotFloorPosition()
-                            if plotCF then
-                                teleportTo(plotCF + Vector3.new(0, 3, 0))
-                            end
-                            task.wait(1)
+                        -- Immediately warp back to owned plot floor
+                        local _, plotCF = getPlotFloorPosition()
+                        if plotCF then
+                            root.CFrame = plotCF + Vector3.new(0, 3, 0)
+                            setStatus("Egg grabbed! Warped back to plot.")
                         end
+                        task.wait(0.8)
                     end
                 end
             end
@@ -650,10 +693,7 @@ task.spawn(function()
             local hum = getHumanoid()
             local backpack = LocalPlayer:FindFirstChild("Backpack")
             if char and hum and backpack then
-                -- Look for egg tools in Backpack or Character
                 local eggTool = nil
-                local targetRarity = "Common"
-                
                 local candidates = {}
                 for _, item in ipairs(backpack:GetChildren()) do
                     if item:IsA("Tool") and (item:GetAttribute("CasePlacementTool") == true or item:GetAttribute("AlbumZone") ~= nil or item.Name:find("Egg") or item.Name:find("Album")) then
@@ -670,25 +710,20 @@ task.spawn(function()
                     local r = tool:GetAttribute("RarityAura") or tool:GetAttribute("AlbumRarity") or tool:GetAttribute("Rarity") or "Common"
                     if Config.PlaceRarityFilters[r] == true then
                         eggTool = tool
-                        targetRarity = r
                         break
                     end
                 end
 
                 if eggTool and PlaceRemote then
-                    -- Equip egg tool
                     hum:EquipTool(eggTool)
                     task.wait(0.2)
-
-                    -- Calculate plot open spot
-                    local plotPos, plotCF, plotSize = getPlotFloorPosition()
+                    local plotPos = getPlotFloorPosition()
                     if plotPos then
                         local incubatingCount = 0
                         local incCases = workspace:FindFirstChild("IncubatingCases")
                         if incCases then
                             incubatingCount = #incCases:GetChildren()
                         end
-
                         local row = incubatingCount % 5 - 2
                         local col = math.floor(incubatingCount / 5) - 2
                         local placePos = Vector3.new(plotPos.X + row * 4, plotPos.Y + 0.3, plotPos.Z + col * 4)
@@ -761,7 +796,6 @@ task.spawn(function()
         end
 
         if myTreadmill then
-            -- Auto Go On Treadmill
             if Config.AutoGoOnTreadmill then
                 local conveyor = myTreadmill:FindFirstChild("Conveyor")
                 local root = getRootPart()
@@ -778,7 +812,6 @@ task.spawn(function()
                 end
             end
 
-            -- Auto Upgrade Treadmill
             if Config.AutoUpgradeTreadmill and TreadmillUpgradeReq then
                 local currentLvl = myTreadmill:GetAttribute("Level") or 1
                 pcall(function()
@@ -789,7 +822,7 @@ task.spawn(function()
     end
 end)
 
--- 6. AUTO PROGRESSION SERVICE (Base, Index, Daily, Trails, Cosmetics)
+-- 6. AUTO PROGRESSION SERVICE
 task.spawn(function()
     local dailyTimer = 0
     local indexTimer = 0
@@ -864,12 +897,8 @@ task.spawn(function()
                 local myMoney = getMoney()
                 for _, trail in ipairs(TRAIL_LIST) do
                     if myMoney >= trail.Cost then
-                        pcall(function()
-                            TrailRequestRemote:InvokeServer("Buy", trail.Id)
-                        end)
-                        pcall(function()
-                            TrailRequestRemote:InvokeServer("Equip", trail.Id)
-                        end)
+                        pcall(function() TrailRequestRemote:InvokeServer("Buy", trail.Id) end)
+                        pcall(function() TrailRequestRemote:InvokeServer("Equip", trail.Id) end)
                     end
                 end
             end)
@@ -885,35 +914,69 @@ task.spawn(function()
     end
 end)
 
--- 7. EXTRA SERVICES: Anti-Ragdoll, Auto Bat Aura, Invisibility, Noclip, Fly
--- Anti-Ragdoll
+-- 7. COMBAT & SURVIVAL: BEAR TRAP IMMUNITY & ANTI-RAGDOLL
+local function neutralizeTraps()
+    for _, trap in ipairs(workspace:GetDescendants()) do
+        if trap:IsA("Model") and (trap.Name:find("BearTrap") or trap.Name:find("Trap") or trap:GetAttribute("BearTrapTool") ~= nil) then
+            for _, part in ipairs(trap:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanTouch = false
+                    part.CanCollide = false
+                end
+            end
+        end
+    end
+end
+
 task.spawn(function()
     while true do
         task.wait(0.5)
         if Config.AntiRagdoll then
-            local hum = getHumanoid()
-            if hum then
-                hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-                hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-            end
-            local char = getCharacter()
-            if char then
-                local ability = char:FindFirstChild("AbilityManagerActor")
-                if ability then
-                    local fDown = ability:FindFirstChild("FallingDown", true)
-                    if fDown then
-                        local sync = fDown:FindFirstChild("SyncedState")
-                        if sync then
-                            sync:SetAttribute("Enabled", false)
-                        end
-                    end
+            pcall(neutralizeTraps)
+        end
+    end
+end)
+
+workspace.DescendantAdded:Connect(function(desc)
+    if Config.AntiRagdoll then
+        if desc:IsA("Model") and (desc.Name:find("BearTrap") or desc.Name:find("Trap")) then
+            for _, part in ipairs(desc:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanTouch = false
+                    part.CanCollide = false
                 end
             end
         end
     end
 end)
 
--- Auto Bat Aura
+RunService.Heartbeat:Connect(function()
+    if Config.AntiRagdoll then
+        local char = getCharacter()
+        local hum = getHumanoid()
+        if hum then
+            hum.PlatformStand = false
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+            local st = hum:GetState()
+            if st == Enum.HumanoidStateType.Ragdoll or st == Enum.HumanoidStateType.FallingDown or hum.PlatformStand then
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end
+        end
+        if char then
+            if char:GetAttribute("GuardRagdolled") == true then char:SetAttribute("GuardRagdolled", false) end
+            if char:GetAttribute("GuardPlatformStand") == true then char:SetAttribute("GuardPlatformStand", false) end
+            if char:GetAttribute("GuardRecovering") == true then char:SetAttribute("GuardRecovering", false) end
+            local grc = char:FindFirstChild("GuardRagdollClient")
+            if grc and grc:IsA("LocalScript") and grc.Enabled then
+                grc.Enabled = false
+            end
+        end
+        LocalPlayer:SetAttribute("GuardStunnedUntil", 0)
+    end
+end)
+
+-- 8. AUTO BAT AURA
 task.spawn(function()
     while true do
         task.wait(0.3)
@@ -936,7 +999,6 @@ task.spawn(function()
                 end
 
                 if bat then
-                    -- Detect nearby guards
                     local targets = {}
                     local dz = workspace:FindFirstChild("DangerZones")
                     if dz then
@@ -960,26 +1022,53 @@ task.spawn(function()
     end
 end)
 
--- Invisibility / Ghost Mode
-task.spawn(function()
-    while true do
-        task.wait(0.5)
-        local char = getCharacter()
-        if char then
-            for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") or part:IsA("Decal") then
-                    if Config.InvisibleGhost then
-                        part.LocalTransparencyModifier = 0.8
-                    else
-                        part.LocalTransparencyModifier = 0
-                    end
-                end
+-- 9. FE SERVER REPLICATED INVISIBILITY
+local origRootC0 = nil
+local isInvisibleActive = false
+
+local function updateFEInvisibility(state)
+    local char = getCharacter()
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local rootJoint = root and (root:FindFirstChild("RootJoint") or char:FindFirstChild("RootJoint", true))
+    
+    if state then
+        if rootJoint and not isInvisibleActive then
+            origRootC0 = rootJoint.C0
+            isInvisibleActive = true
+            -- Offsets character body 999,999 studs underground for all other players across server
+            rootJoint.C0 = origRootC0 * CFrame.new(0, -999999, 0)
+        end
+        -- Semi-transparent locally so player can navigate comfortably
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") or part:IsA("Decal") then
+                part.LocalTransparencyModifier = 0.5
+            end
+        end
+    else
+        if rootJoint and isInvisibleActive and origRootC0 then
+            rootJoint.C0 = origRootC0
+            origRootC0 = nil
+            isInvisibleActive = false
+        end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") or part:IsA("Decal") then
+                part.LocalTransparencyModifier = 0
             end
         end
     end
+end
+
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+    isInvisibleActive = false
+    origRootC0 = nil
+    if Config.InvisibleGhost then
+        task.wait(0.5)
+        updateFEInvisibility(true)
+    end
 end)
 
--- Noclip Service
+-- 10. NOCLIP, SPEED, JUMP, ANTI-AFK
 RunService.Stepped:Connect(function()
     if Config.Noclip then
         local char = getCharacter()
@@ -993,7 +1082,6 @@ RunService.Stepped:Connect(function()
     end
 end)
 
--- Custom WalkSpeed
 task.spawn(function()
     while true do
         task.wait(0.2)
@@ -1004,7 +1092,6 @@ task.spawn(function()
     end
 end)
 
--- Infinite Jump
 UserInputService.JumpRequest:Connect(function()
     if Config.InfiniteJump then
         local hum = getHumanoid()
@@ -1014,7 +1101,6 @@ UserInputService.JumpRequest:Connect(function()
     end
 end)
 
--- Anti-AFK
 if Config.AntiAFK then
     LocalPlayer.Idled:Connect(function()
         VirtualUser:CaptureController()
@@ -1023,14 +1109,26 @@ if Config.AntiAFK then
 end
 
 ---------------------------------------------------------------------------
--- EGG ESP SERVICE
+-- USER INTERFACE: "Alexandria Main"
+---------------------------------------------------------------------------
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AlexandriaHub_StealKPOPEggs"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.DisplayOrder = 9999
+ScreenGui.Parent = getGuiParent()
+
+---------------------------------------------------------------------------
+-- EGG ESP SERVICE (Renders directly into ScreenGui for 100% visibility)
 ---------------------------------------------------------------------------
 local ActiveESPs = {}
 
 local function clearESP(obj)
     if ActiveESPs[obj] then
-        if ActiveESPs[obj].Highlight then ActiveESPs[obj].Highlight:Destroy() end
-        if ActiveESPs[obj].Billboard then ActiveESPs[obj].Billboard:Destroy() end
+        pcall(function()
+            if ActiveESPs[obj].Highlight then ActiveESPs[obj].Highlight:Destroy() end
+            if ActiveESPs[obj].Billboard then ActiveESPs[obj].Billboard:Destroy() end
+        end)
         ActiveESPs[obj] = nil
     end
 end
@@ -1045,76 +1143,90 @@ local function updateEggESP()
 
     local root = getRootPart()
     local myPos = root and root.Position or Vector3.new(0, 0, 0)
-    local eggs = getAllEligibleEggs()
+    local eggs = getAllEggs()
 
     local seen = {}
     for _, eggInfo in ipairs(eggs) do
         local obj = eggInfo.Object
         seen[obj] = true
 
-        if Config.ESPRarityFilters[eggInfo.Rarity] == true then
+        local showRarity = (next(Config.ESPRarityFilters) == nil) or (Config.ESPRarityFilters[eggInfo.Rarity] == true)
+
+        if showRarity then
             local dist = math.floor((eggInfo.Position - myPos).Magnitude)
             local color = RARITY_COLORS[eggInfo.Rarity] or Color3.fromRGB(255, 255, 255)
 
             if not ActiveESPs[obj] then
-                -- Highlight
-                local hl = Instance.new("Highlight")
-                hl.Name = "Alexandria_EggESP"
-                hl.Adornee = obj
-                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                hl.FillColor = color
-                hl.OutlineColor = color
-                hl.FillTransparency = 0.65
-                hl.OutlineTransparency = 0
-                hl.Parent = obj
+                local adorneePart = (obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChild("CasePart") or obj:FindFirstChildWhichIsA("BasePart"))) 
+                    or (obj:IsA("Tool") and (obj:FindFirstChild("Handle") or obj:FindFirstChildWhichIsA("BasePart"))) 
+                    or (obj:IsA("BasePart") and obj)
 
-                -- BillboardGui
-                local bb = Instance.new("BillboardGui")
-                bb.Name = "Alexandria_EggLabel"
-                bb.Adornee = obj
-                bb.Size = UDim2.fromOffset(180, 48)
-                bb.StudsOffset = Vector3.new(0, 3.2, 0)
-                bb.AlwaysOnTop = true
-                bb.Parent = obj
+                local hl = nil
+                pcall(function()
+                    hl = Instance.new("Highlight")
+                    hl.Name = "Alexandria_EggESP"
+                    hl.Adornee = obj
+                    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    hl.FillColor = color
+                    hl.OutlineColor = color
+                    hl.FillTransparency = 0.65
+                    hl.OutlineTransparency = 0
+                    hl.Parent = ScreenGui
+                end)
 
-                local frame = Instance.new("Frame")
-                frame.Size = UDim2.fromScale(1, 1)
-                frame.BackgroundTransparency = 0.4
-                frame.BackgroundColor3 = Color3.fromRGB(15, 16, 22)
-                frame.BorderSizePixel = 0
-                frame.Parent = bb
+                local bb = nil
+                local infoLabel = nil
+                if adorneePart then
+                    pcall(function()
+                        bb = Instance.new("BillboardGui")
+                        bb.Name = "Alexandria_EggLabel"
+                        bb.Adornee = adorneePart
+                        bb.Size = UDim2.fromOffset(170, 44)
+                        bb.StudsOffset = Vector3.new(0, 3.0, 0)
+                        bb.AlwaysOnTop = true
+                        bb.MaxDistance = 5000
+                        bb.Parent = ScreenGui
 
-                local uic = Instance.new("UICorner")
-                uic.CornerRadius = UDim.new(0, 6)
-                uic.Parent = frame
+                        local frame = Instance.new("Frame")
+                        frame.Size = UDim2.fromScale(1, 1)
+                        frame.BackgroundTransparency = 0.35
+                        frame.BackgroundColor3 = Color3.fromRGB(15, 16, 22)
+                        frame.BorderSizePixel = 0
+                        frame.Parent = bb
 
-                local uis = Instance.new("UIStroke")
-                uis.Color = color
-                uis.Thickness = 1.5
-                uis.Parent = frame
+                        local uic = Instance.new("UICorner")
+                        uic.CornerRadius = UDim.new(0, 6)
+                        uic.Parent = frame
 
-                local nameLabel = Instance.new("TextLabel")
-                nameLabel.Name = "Title"
-                nameLabel.Size = UDim2.new(1, -8, 0, 20)
-                nameLabel.Position = UDim2.fromOffset(4, 3)
-                nameLabel.BackgroundTransparency = 1
-                nameLabel.Font = Enum.Font.GothamBold
-                nameLabel.TextSize = 13
-                nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-                nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
-                nameLabel.Text = eggInfo.Name
-                nameLabel.Parent = frame
+                        local uis = Instance.new("UIStroke")
+                        uis.Color = color
+                        uis.Thickness = 1.5
+                        uis.Parent = frame
 
-                local infoLabel = Instance.new("TextLabel")
-                infoLabel.Name = "Info"
-                infoLabel.Size = UDim2.new(1, -8, 0, 18)
-                infoLabel.Position = UDim2.fromOffset(4, 23)
-                infoLabel.BackgroundTransparency = 1
-                infoLabel.Font = Enum.Font.Gotham
-                infoLabel.TextSize = 11
-                infoLabel.TextColor3 = color
-                infoLabel.Text = string.format("[%s] %s • %dm", eggInfo.Zone, eggInfo.Rarity, dist)
-                infoLabel.Parent = frame
+                        local nameLabel = Instance.new("TextLabel")
+                        nameLabel.Name = "Title"
+                        nameLabel.Size = UDim2.new(1, -8, 0, 18)
+                        nameLabel.Position = UDim2.fromOffset(4, 2)
+                        nameLabel.BackgroundTransparency = 1
+                        nameLabel.Font = Enum.Font.GothamBold
+                        nameLabel.TextSize = 12
+                        nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+                        nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+                        nameLabel.Text = eggInfo.Name
+                        nameLabel.Parent = frame
+
+                        infoLabel = Instance.new("TextLabel")
+                        infoLabel.Name = "Info"
+                        infoLabel.Size = UDim2.new(1, -8, 0, 16)
+                        infoLabel.Position = UDim2.fromOffset(4, 20)
+                        infoLabel.BackgroundTransparency = 1
+                        infoLabel.Font = Enum.Font.Gotham
+                        infoLabel.TextSize = 11
+                        infoLabel.TextColor3 = color
+                        infoLabel.Text = string.format("[%s] %s • %dm", eggInfo.Zone, eggInfo.Rarity, dist)
+                        infoLabel.Parent = frame
+                    end)
+                end
 
                 ActiveESPs[obj] = { Highlight = hl, Billboard = bb, InfoLabel = infoLabel, Color = color }
             else
@@ -1141,24 +1253,16 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
----------------------------------------------------------------------------
--- USER INTERFACE: "Alexandria Main"
----------------------------------------------------------------------------
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "AlexandriaHub_StealKPOPEggs"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.DisplayOrder = 99999
-ScreenGui.Parent = getGuiParent()
-
--- Main Window
+-- Main Frame (780 x 500)
 local MainFrame = Instance.new("Frame")
 MainFrame.Name = "MainFrame"
 MainFrame.Size = UDim2.fromOffset(780, 500)
-MainFrame.Position = UDim2.new(0.5, -390, 0.5, -250)
-MainFrame.BackgroundColor3 = Color3.fromRGB(15, 16, 20)
+MainFrame.Position = UDim2.fromScale(0.5, 0.5)
+MainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 16, 22)
 MainFrame.BorderSizePixel = 0
 MainFrame.ClipsDescendants = false
+MainFrame.Active = true
 MainFrame.Parent = ScreenGui
 
 local MainCorner = Instance.new("UICorner")
@@ -1166,22 +1270,24 @@ MainCorner.CornerRadius = UDim.new(0, 10)
 MainCorner.Parent = MainFrame
 
 local MainStroke = Instance.new("UIStroke")
-MainStroke.Color = Color3.fromRGB(35, 38, 48)
+MainStroke.Color = Color3.fromRGB(35, 38, 52)
 MainStroke.Thickness = 1
 MainStroke.Parent = MainFrame
 
--- Draggable Functionality
-local dragging, dragInput, dragStart, startPos
+-- Dragging Behavior for MainFrame
+local isDragging, dragInput, dragStart, startPos
 MainFrame.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dragStart = input.Position
-        startPos = MainFrame.Position
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
-        end)
+        if input.Position.Y - MainFrame.AbsolutePosition.Y <= 42 then
+            isDragging = true
+            dragStart = input.Position
+            startPos = MainFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    isDragging = false
+                end
+            end)
+        end
     end
 end)
 
@@ -1192,13 +1298,13 @@ MainFrame.InputChanged:Connect(function(input)
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-    if input == dragInput and dragging then
+    if input == dragInput and isDragging then
         local delta = input.Position - dragStart
         MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
     end
 end)
 
--- Top Header
+-- Header
 local Header = Instance.new("Frame")
 Header.Name = "Header"
 Header.Size = UDim2.new(1, 0, 0, 42)
@@ -1206,7 +1312,7 @@ Header.BackgroundTransparency = 1
 Header.Parent = MainFrame
 
 local HeaderTitle = Instance.new("TextLabel")
-HeaderTitle.Size = UDim2.new(0, 200, 1, 0)
+HeaderTitle.Size = UDim2.new(0, 240, 1, 0)
 HeaderTitle.Position = UDim2.fromOffset(16, 0)
 HeaderTitle.BackgroundTransparency = 1
 HeaderTitle.Font = Enum.Font.GothamBold
@@ -1216,11 +1322,11 @@ HeaderTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
 HeaderTitle.Text = "◈  Alexandria Main"
 HeaderTitle.Parent = Header
 
--- Floating Circular Minimize Icon Button (Matches user request)
+-- Floating Circular Minimize Icon Button
 local FloatingIcon = Instance.new("ImageButton")
 FloatingIcon.Name = "Alexandria_FloatingIcon"
 FloatingIcon.Size = UDim2.fromOffset(50, 50)
-FloatingIcon.Position = UDim2.new(0.5, -25, 0, 16)
+FloatingIcon.Position = UDim2.new(0.5, -25, 0, 18)
 FloatingIcon.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
 FloatingIcon.BorderSizePixel = 0
 FloatingIcon.Visible = false
@@ -1236,24 +1342,16 @@ FloatStroke.Color = Color3.fromRGB(99, 102, 241)
 FloatStroke.Thickness = 2
 FloatStroke.Parent = FloatingIcon
 
-local FloatGrad = Instance.new("UIGradient")
-FloatGrad.Color = ColorSequence.new({
-    ColorSequenceKeypoint.new(0, Color3.fromRGB(35, 38, 55)),
-    ColorSequenceKeypoint.new(1, Color3.fromRGB(16, 18, 26))
-})
-FloatGrad.Rotation = 45
-FloatGrad.Parent = FloatingIcon
+local FloatInnerIcon = Instance.new("TextLabel")
+FloatInnerIcon.Size = UDim2.fromScale(1, 1)
+FloatInnerIcon.BackgroundTransparency = 1
+FloatInnerIcon.Font = Enum.Font.GothamBold
+FloatInnerIcon.TextSize = 22
+FloatInnerIcon.TextColor3 = Color3.fromRGB(255, 255, 255)
+FloatInnerIcon.Text = "◈"
+FloatInnerIcon.Parent = FloatingIcon
 
-local FloatIconLabel = Instance.new("TextLabel")
-FloatIconLabel.Size = UDim2.fromScale(1, 1)
-FloatIconLabel.BackgroundTransparency = 1
-FloatIconLabel.Font = Enum.Font.GothamBold
-FloatIconLabel.TextSize = 22
-FloatIconLabel.TextColor3 = Color3.fromRGB(240, 245, 255)
-FloatIconLabel.Text = "◈"
-FloatIconLabel.Parent = FloatingIcon
-
--- Draggable functionality for Floating Icon
+-- Draggable Floating Icon
 local fDragging, fDragInput, fDragStart, fStartPos
 FloatingIcon.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -1281,7 +1379,6 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 
--- Click Floating Icon to restore MainFrame
 FloatingIcon.MouseButton1Click:Connect(function()
     FloatingIcon.Visible = false
     MainFrame.Visible = true
@@ -1316,56 +1413,62 @@ TabButtonsLayout.Padding = UDim.new(0, 6)
 TabButtonsLayout.SortOrder = Enum.SortOrder.LayoutOrder
 TabButtonsLayout.Parent = Sidebar
 
+local SidebarPad = Instance.new("UIPadding")
+SidebarPad.PaddingTop = UDim.new(0, 8)
+SidebarPad.PaddingLeft = UDim.new(0, 4)
+SidebarPad.PaddingRight = UDim.new(0, 4)
+SidebarPad.Parent = Sidebar
+
 -- Content Container (Right)
 local ContentContainer = Instance.new("Frame")
 ContentContainer.Name = "ContentContainer"
-ContentContainer.Size = UDim2.new(1, -180, 1, -80)
-ContentContainer.Position = UDim2.fromOffset(170, 42)
+ContentContainer.Size = UDim2.new(1, -182, 1, -80)
+ContentContainer.Position = UDim2.fromOffset(172, 42)
 ContentContainer.BackgroundTransparency = 1
+ContentContainer.ClipsDescendants = false
 ContentContainer.Parent = MainFrame
 
--- Footer (Bottom)
+-- Footer (Status Bar)
 local Footer = Instance.new("Frame")
 Footer.Name = "Footer"
 Footer.Size = UDim2.new(1, 0, 0, 36)
 Footer.Position = UDim2.new(0, 0, 1, -36)
-Footer.BackgroundTransparency = 1
+Footer.BackgroundColor3 = Color3.fromRGB(12, 13, 17)
+Footer.BorderSizePixel = 0
 Footer.Parent = MainFrame
 
-local FooterDiscord = Instance.new("TextLabel")
-FooterDiscord.Size = UDim2.new(0, 200, 1, 0)
-FooterDiscord.Position = UDim2.fromOffset(16, 0)
-FooterDiscord.BackgroundTransparency = 1
-FooterDiscord.Font = Enum.Font.Gotham
-FooterDiscord.TextSize = 12
-FooterDiscord.TextXAlignment = Enum.TextXAlignment.Left
-FooterDiscord.TextColor3 = Color3.fromRGB(100, 110, 130)
-FooterDiscord.Text = "discord.gg/synapsex"
-FooterDiscord.Parent = Footer
+local FooterCorner = Instance.new("UICorner")
+FooterCorner.CornerRadius = UDim.new(0, 10)
+FooterCorner.Parent = Footer
 
-local FooterGame = Instance.new("TextLabel")
-FooterGame.Size = UDim2.new(0, 200, 1, 0)
-FooterGame.Position = UDim2.new(0.5, -100, 0, 0)
-FooterGame.BackgroundTransparency = 1
-FooterGame.Font = Enum.Font.GothamMedium
-FooterGame.TextSize = 12
-FooterGame.TextColor3 = Color3.fromRGB(140, 150, 175)
-FooterGame.Text = "Steal KPOP Eggs"
-FooterGame.Parent = Footer
+local FooterText = Instance.new("TextLabel")
+FooterText.Size = UDim2.new(0.65, 0, 1, 0)
+FooterText.Position = UDim2.fromOffset(16, 0)
+FooterText.BackgroundTransparency = 1
+FooterText.Font = Enum.Font.Gotham
+FooterText.TextSize = 11
+FooterText.TextXAlignment = Enum.TextXAlignment.Left
+FooterText.TextColor3 = Color3.fromRGB(120, 125, 145)
+FooterText.Text = "Status: Idle | Anti-Detect Safe | Ready"
+FooterText.Parent = Footer
+
+updateUIStatus = function(txt)
+    FooterText.Text = "Status: " .. txt .. " | Anti-Detect Safe"
+end
 
 local FooterBuild = Instance.new("TextLabel")
-FooterBuild.Size = UDim2.new(0, 150, 1, 0)
-FooterBuild.Position = UDim2.new(1, -166, 0, 0)
+FooterBuild.Size = UDim2.new(0.3, 0, 1, 0)
+FooterBuild.Position = UDim2.new(0.7, -16, 0, 0)
 FooterBuild.BackgroundTransparency = 1
 FooterBuild.Font = Enum.Font.Gotham
-FooterBuild.TextSize = 12
+FooterBuild.TextSize = 11
 FooterBuild.TextXAlignment = Enum.TextXAlignment.Right
-FooterBuild.TextColor3 = Color3.fromRGB(100, 110, 130)
-FooterBuild.Text = "Build: 0.1  ⤡"
+FooterBuild.TextColor3 = Color3.fromRGB(80, 85, 105)
+FooterBuild.Text = "Alexandria v3.2 (Enhanced)"
 FooterBuild.Parent = Footer
 
 ---------------------------------------------------------------------------
--- TAB SYSTEM
+-- TAB SYSTEM (Main, Extra, Settings ONLY)
 ---------------------------------------------------------------------------
 local Tabs = {}
 local TabButtons = {}
@@ -1378,6 +1481,8 @@ local function createTab(tabName, iconText)
     tabFrame.BorderSizePixel = 0
     tabFrame.ScrollBarThickness = 3
     tabFrame.ScrollBarImageColor3 = Color3.fromRGB(60, 65, 85)
+    tabFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    tabFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
     tabFrame.Visible = false
     tabFrame.Parent = ContentContainer
 
@@ -1415,145 +1520,111 @@ end
 
 local MainTab     = createTab("Main", "◎")
 local ExtraTab    = createTab("Extra", "✦")
-local VisualsTab  = createTab("Visuals", "◉")
-local TeleportTab = createTab("Teleport", "⚲")
 local SettingsTab = createTab("Settings", "⚙")
 
--- Activate Main Tab by default
 Tabs["Main"].Visible = true
 TabButtons["Main"].BackgroundColor3 = Color3.fromRGB(32, 35, 46)
 TabButtons["Main"].TextColor3 = Color3.fromRGB(255, 255, 255)
 
 ---------------------------------------------------------------------------
--- UI COMPONENT BUILDERS (Cards, Toggles, Dropdowns, Buttons)
+-- UI COMPONENT BUILDERS
 ---------------------------------------------------------------------------
 local function createCard(parent, title, icon)
     local card = Instance.new("Frame")
     card.Name = title:gsub("%s+", "") .. "Card"
-    card.Size = UDim2.new(1, 0, 0, 40) -- Auto calculated
+    card.Size = UDim2.new(1, 0, 0, 40)
     card.AutomaticSize = Enum.AutomaticSize.Y
     card.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
     card.BorderSizePixel = 0
+    card.ClipsDescendants = false
     card.Parent = parent
 
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
-    corner.Parent = card
+    local cardCorner = Instance.new("UICorner")
+    cardCorner.CornerRadius = UDim.new(0, 8)
+    cardCorner.Parent = card
 
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(32, 35, 46)
-    stroke.Thickness = 1
-    stroke.Parent = card
+    local cardStroke = Instance.new("UIStroke")
+    cardStroke.Color = Color3.fromRGB(32, 35, 46)
+    cardStroke.Thickness = 1
+    cardStroke.Parent = card
 
-    local cardHeader = Instance.new("Frame")
-    cardHeader.Size = UDim2.new(1, 0, 0, 36)
+    local cardPad = Instance.new("UIPadding")
+    cardPad.PaddingTop = UDim.new(0, 10)
+    cardPad.PaddingBottom = UDim.new(0, 12)
+    cardPad.PaddingLeft = UDim.new(0, 12)
+    cardPad.PaddingRight = UDim.new(0, 12)
+    cardPad.Parent = card
+
+    local cardLayout = Instance.new("UIListLayout")
+    cardLayout.Padding = UDim.new(0, 8)
+    cardLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    cardLayout.Parent = card
+
+    local cardHeader = Instance.new("TextLabel")
+    cardHeader.Name = "CardHeader"
+    cardHeader.Size = UDim2.new(1, 0, 0, 20)
     cardHeader.BackgroundTransparency = 1
+    cardHeader.Font = Enum.Font.GothamBold
+    cardHeader.TextSize = 13
+    cardHeader.TextXAlignment = Enum.TextXAlignment.Left
+    cardHeader.TextColor3 = Color3.fromRGB(240, 242, 250)
+    cardHeader.Text = (icon and (icon .. "  ") or "") .. title
+    cardHeader.LayoutOrder = 0
     cardHeader.Parent = card
 
-    local titleLabel = Instance.new("TextLabel")
-    titleLabel.Size = UDim2.new(1, -40, 1, 0)
-    titleLabel.Position = UDim2.fromOffset(12, 0)
-    titleLabel.BackgroundTransparency = 1
-    titleLabel.Font = Enum.Font.GothamBold
-    titleLabel.TextSize = 13
-    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-    titleLabel.TextColor3 = Color3.fromRGB(230, 235, 245)
-    titleLabel.Text = (icon and (icon .. "  ") or "") .. title
-    titleLabel.Parent = cardHeader
-
-    local collapseBtn = Instance.new("TextButton")
-    collapseBtn.Size = UDim2.fromOffset(24, 24)
-    collapseBtn.Position = UDim2.new(1, -30, 0, 6)
-    collapseBtn.BackgroundTransparency = 1
-    collapseBtn.Font = Enum.Font.GothamBold
-    collapseBtn.TextSize = 12
-    collapseBtn.TextColor3 = Color3.fromRGB(140, 145, 165)
-    collapseBtn.Text = "∧"
-    collapseBtn.Parent = cardHeader
-
-    local cardContent = Instance.new("Frame")
-    cardContent.Name = "Content"
-    cardContent.Size = UDim2.new(1, -20, 0, 0)
-    cardContent.Position = UDim2.fromOffset(10, 36)
-    cardContent.AutomaticSize = Enum.AutomaticSize.Y
-    cardContent.BackgroundTransparency = 1
-    cardContent.Parent = card
-
-    local contentLayout = Instance.new("UIListLayout")
-    contentLayout.Padding = UDim.new(0, 8)
-    contentLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    contentLayout.Parent = cardContent
-
-    local bottomPad = Instance.new("UIPadding")
-    bottomPad.PaddingBottom = UDim.new(0, 10)
-    bottomPad.Parent = cardContent
-
-    local collapsed = false
-    collapseBtn.MouseButton1Click:Connect(function()
-        collapsed = not collapsed
-        cardContent.Visible = not collapsed
-        collapseBtn.Text = collapsed and "∨" or "∧"
-    end)
-
-    return cardContent
+    return card
 end
 
-local function createToggle(parent, text, defaultVal, callback)
-    local toggleFrame = Instance.new("Frame")
-    toggleFrame.Size = UDim2.new(1, 0, 0, 24)
-    toggleFrame.BackgroundTransparency = 1
-    toggleFrame.Parent = parent
-
-    local box = Instance.new("TextButton")
-    box.Size = UDim2.fromOffset(18, 18)
-    box.Position = UDim2.fromOffset(0, 3)
-    box.BackgroundColor3 = defaultVal and Color3.fromRGB(99, 102, 241) or Color3.fromRGB(26, 28, 38)
-    box.Text = defaultVal and "✓" or ""
-    box.TextColor3 = Color3.fromRGB(255, 255, 255)
-    box.Font = Enum.Font.GothamBold
-    box.TextSize = 12
-    box.Parent = toggleFrame
-
-    local boxCorner = Instance.new("UICorner")
-    boxCorner.CornerRadius = UDim.new(0, 4)
-    boxCorner.Parent = box
-
-    local boxStroke = Instance.new("UIStroke")
-    boxStroke.Color = defaultVal and Color3.fromRGB(129, 140, 248) or Color3.fromRGB(45, 49, 66)
-    boxStroke.Thickness = 1
-    boxStroke.Parent = box
+local function createToggle(parent, labelText, defaultValue, callback)
+    local state = defaultValue or false
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(1, 0, 0, 28)
+    container.BackgroundTransparency = 1
+    container.Parent = parent
 
     local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, -28, 1, 0)
-    label.Position = UDim2.fromOffset(26, 0)
+    label.Size = UDim2.new(1, -50, 1, 0)
     label.BackgroundTransparency = 1
     label.Font = Enum.Font.Gotham
-    label.TextSize = 13
+    label.TextSize = 12
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.TextColor3 = Color3.fromRGB(200, 205, 220)
-    label.Text = text
-    label.Parent = toggleFrame
+    label.Text = labelText
+    label.Parent = container
 
-    local state = defaultVal
-    local function toggle()
+    local toggleTrack = Instance.new("TextButton")
+    toggleTrack.Size = UDim2.fromOffset(40, 20)
+    toggleTrack.Position = UDim2.new(1, -40, 0.5, -10)
+    toggleTrack.BackgroundColor3 = state and Color3.fromRGB(99, 102, 241) or Color3.fromRGB(40, 44, 58)
+    toggleTrack.BorderSizePixel = 0
+    toggleTrack.Text = ""
+    toggleTrack.Parent = container
+
+    local trackCorner = Instance.new("UICorner")
+    trackCorner.CornerRadius = UDim.new(1, 0)
+    trackCorner.Parent = toggleTrack
+
+    local toggleThumb = Instance.new("Frame")
+    toggleThumb.Size = UDim2.fromOffset(16, 16)
+    toggleThumb.Position = state and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+    toggleThumb.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    toggleThumb.BorderSizePixel = 0
+    toggleThumb.Parent = toggleTrack
+
+    local thumbCorner = Instance.new("UICorner")
+    thumbCorner.CornerRadius = UDim.new(1, 0)
+    thumbCorner.Parent = toggleThumb
+
+    toggleTrack.MouseButton1Click:Connect(function()
         state = not state
-        box.BackgroundColor3 = state and Color3.fromRGB(99, 102, 241) or Color3.fromRGB(26, 28, 38)
-        boxStroke.Color = state and Color3.fromRGB(129, 140, 248) or Color3.fromRGB(45, 49, 66)
-        box.Text = state and "✓" or ""
-        if callback then
-            callback(state)
-        end
-    end
+        local targetPos = state and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+        local targetColor = state and Color3.fromRGB(99, 102, 241) or Color3.fromRGB(40, 44, 58)
+        TweenService:Create(toggleThumb, TweenInfo.new(0.18), { Position = targetPos }):Play()
+        TweenService:Create(toggleTrack, TweenInfo.new(0.18), { BackgroundColor3 = targetColor }):Play()
+        if callback then callback(state) end
+    end)
 
-    box.MouseButton1Click:Connect(toggle)
-    local clickDetector = Instance.new("TextButton")
-    clickDetector.Size = UDim2.fromScale(1, 1)
-    clickDetector.BackgroundTransparency = 1
-    clickDetector.Text = ""
-    clickDetector.Parent = label
-    clickDetector.MouseButton1Click:Connect(toggle)
-
-    return toggleFrame
+    return container
 end
 
 local activeDropdownClose = nil
@@ -1564,6 +1635,7 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
     ddFrame.Size = UDim2.new(1, 0, 0, 48)
     ddFrame.BackgroundTransparency = 1
     ddFrame.ClipsDescendants = false
+    ddFrame.ZIndex = 75
     ddFrame.Parent = parent
 
     local title = Instance.new("TextLabel")
@@ -1585,6 +1657,7 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
     selectBtn.TextSize = 12
     selectBtn.TextXAlignment = Enum.TextXAlignment.Left
     selectBtn.TextColor3 = Color3.fromRGB(210, 215, 230)
+    selectBtn.ZIndex = 76
     selectBtn.Parent = ddFrame
 
     local btnCorner = Instance.new("UICorner")
@@ -1604,9 +1677,9 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
     arrow.TextSize = 10
     arrow.TextColor3 = Color3.fromRGB(140, 145, 165)
     arrow.Text = "∨"
+    arrow.ZIndex = 77
     arrow.Parent = selectBtn
 
-    -- Option List Container (Scrollable)
     local listContainer = Instance.new("ScrollingFrame")
     listContainer.Name = "DropdownList"
     listContainer.Size = UDim2.new(1, 0, 0, 130)
@@ -1657,10 +1730,12 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
             end
             if #names == 0 then
                 selectBtn.Text = "  None Selected"
+            elseif #names == #options then
+                selectBtn.Text = "  All Selected (" .. #options .. ")"
             elseif #names <= 2 then
                 selectBtn.Text = "  " .. table.concat(names, ", ")
             else
-                selectBtn.Text = "  " .. names[1] .. ", " .. names[2] .. "..."
+                selectBtn.Text = "  " .. names[1] .. ", " .. names[2] .. "... (" .. #names .. ")"
             end
         else
             selectBtn.Text = "  " .. tostring(selectedState)
@@ -1739,28 +1814,32 @@ end
 
 local function createButton(parent, text, callback)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 32)
-    btn.BackgroundColor3 = Color3.fromRGB(28, 30, 42)
+    btn.Size = UDim2.new(1, 0, 0, 30)
+    btn.BackgroundColor3 = Color3.fromRGB(30, 33, 45)
     btn.BorderSizePixel = 0
     btn.Font = Enum.Font.GothamMedium
-    btn.TextSize = 13
-    btn.TextColor3 = Color3.fromRGB(235, 240, 255)
+    btn.TextSize = 12
+    btn.TextColor3 = Color3.fromRGB(230, 235, 245)
     btn.Text = text
     btn.Parent = parent
 
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 6)
-    corner.Parent = btn
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 6)
+    btnCorner.Parent = btn
 
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(45, 49, 68)
-    stroke.Thickness = 1
-    stroke.Parent = btn
+    local btnStroke = Instance.new("UIStroke")
+    btnStroke.Color = Color3.fromRGB(45, 50, 68)
+    btnStroke.Thickness = 1
+    btnStroke.Parent = btn
+
+    btn.MouseEnter:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(42, 46, 62) }):Play()
+    end)
+    btn.MouseLeave:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(30, 33, 45) }):Play()
+    end)
 
     btn.MouseButton1Click:Connect(function()
-        TweenService:Create(btn, TweenInfo.new(0.08), { BackgroundColor3 = Color3.fromRGB(45, 49, 68) }):Play()
-        task.wait(0.08)
-        TweenService:Create(btn, TweenInfo.new(0.08), { BackgroundColor3 = Color3.fromRGB(28, 30, 42) }):Play()
         if callback then callback() end
     end)
 
@@ -1768,35 +1847,43 @@ local function createButton(parent, text, callback)
 end
 
 ---------------------------------------------------------------------------
--- POPULATE MAIN TAB (2-Column Grid Matching Picture)
+-- POPULATE MAIN TAB (2-Column Layout Matching picture-1.png)
 ---------------------------------------------------------------------------
-local MainLayoutGrid = Instance.new("Frame")
-MainLayoutGrid.Size = UDim2.new(1, -10, 1, 0)
-MainLayoutGrid.BackgroundTransparency = 1
-MainLayoutGrid.Parent = MainTab
+local ColumnsContainer = Instance.new("Frame")
+ColumnsContainer.Size = UDim2.new(1, 0, 0, 0)
+ColumnsContainer.AutomaticSize = Enum.AutomaticSize.Y
+ColumnsContainer.BackgroundTransparency = 1
+ColumnsContainer.Parent = MainTab
 
+local ColumnsLayout = Instance.new("UIListLayout")
+ColumnsLayout.FillDirection = Enum.FillDirection.Horizontal
+ColumnsLayout.Padding = UDim.new(0, 10)
+ColumnsLayout.Parent = ColumnsContainer
+
+-- Left Column
 local Col1 = Instance.new("Frame")
-Col1.Name = "Column1"
-Col1.Size = UDim2.new(0.5, -6, 1, 0)
-Col1.Position = UDim2.fromOffset(0, 0)
+Col1.Name = "Col1"
+Col1.Size = UDim2.new(0.5, -5, 0, 0)
+Col1.AutomaticSize = Enum.AutomaticSize.Y
 Col1.BackgroundTransparency = 1
-Col1.Parent = MainLayoutGrid
+Col1.ClipsDescendants = false
+Col1.Parent = ColumnsContainer
 
 local Col1Layout = Instance.new("UIListLayout")
 Col1Layout.Padding = UDim.new(0, 10)
-Col1Layout.SortOrder = Enum.SortOrder.LayoutOrder
 Col1Layout.Parent = Col1
 
+-- Right Column
 local Col2 = Instance.new("Frame")
-Col2.Name = "Column2"
-Col2.Size = UDim2.new(0.5, -6, 1, 0)
-Col2.Position = UDim2.new(0.5, 6, 0, 0)
+Col2.Name = "Col2"
+Col2.Size = UDim2.new(0.5, -5, 0, 0)
+Col2.AutomaticSize = Enum.AutomaticSize.Y
 Col2.BackgroundTransparency = 1
-Col2.Parent = MainLayoutGrid
+Col2.ClipsDescendants = false
+Col2.Parent = ColumnsContainer
 
 local Col2Layout = Instance.new("UIListLayout")
 Col2Layout.Padding = UDim.new(0, 10)
-Col2Layout.SortOrder = Enum.SortOrder.LayoutOrder
 Col2Layout.Parent = Col2
 
 -- COLUMN 1 CARDS:
@@ -1828,8 +1915,10 @@ StatusLabel.TextColor3 = Color3.fromRGB(80, 220, 140)
 StatusLabel.Text = "Status: Idle"
 StatusLabel.Parent = StealCard
 
+local prevUpdateUIStatus = updateUIStatus
 updateUIStatus = function(txt)
     StatusLabel.Text = "Status: " .. txt
+    if prevUpdateUIStatus then prevUpdateUIStatus(txt) end
 end
 
 -- 2. Treadmill Card
@@ -1884,20 +1973,26 @@ createToggle(ProgressionCard, "Auto Buy Cosmetics", Config.AutoBuyCosmetics, fun
     Config.AutoBuyCosmetics = v
 end)
 
--- 3. Teleport Card
+-- 3. Teleport Card (With dedicated Teleport To Plot and Teleport To Zone button)
 local TeleportCard = createCard(Col2, "Teleport", "⚲")
 createButton(TeleportCard, "Teleport To Plot", function()
     local _, plotCF = getPlotFloorPosition()
     if plotCF then
-        teleportTo(plotCF + Vector3.new(0, 3, 0))
+        teleportTo(plotCF + Vector3.new(0, 3, 0), true)
+        setStatus("Teleported to Plot!")
     else
         setStatus("Could not locate owned plot!")
     end
 end)
+
 createDropdown(TeleportCard, "Zone", ZONES, Config.SelectedTeleportZone, false, function(selected)
     Config.SelectedTeleportZone = selected
-    -- Teleport to zone immediately upon selection or use teleport button
+end)
+
+createButton(TeleportCard, "Teleport To Zone", function()
+    local selected = Config.SelectedTeleportZone or ZONES[1]
     local dz = workspace:FindFirstChild("DangerZones")
+    local found = false
     if dz then
         for _, z in ipairs(dz:GetChildren()) do
             local zName = z:GetAttribute("ZoneName") or z.Name
@@ -1905,9 +2000,40 @@ createDropdown(TeleportCard, "Zone", ZONES, Config.SelectedTeleportZone, false, 
                 local startX = z:GetAttribute("StartX") or 0
                 local endX = z:GetAttribute("EndX") or startX + 50
                 local centerZ = dz:GetAttribute("CenterZ") or 0
-                teleportTo(Vector3.new((startX + endX) / 2, 8, centerZ))
+                teleportTo(Vector3.new((startX + endX) / 2, 8, centerZ), true)
+                setStatus("Teleported to Zone: " .. selected)
+                found = true
                 break
             end
+        end
+    end
+    if not found then
+        setStatus("Zone " .. tostring(selected) .. " not found!")
+    end
+end)
+
+createButton(TeleportCard, "Teleport: Treadmill Conveyor", function()
+    for _, tm in ipairs(CollectionService:GetTagged("Treadmill")) do
+        if tm:GetAttribute("OwnerUserId") == LocalPlayer.UserId then
+            local conveyor = tm:FindFirstChild("Conveyor")
+            if conveyor then
+                teleportTo(conveyor.CFrame + Vector3.new(0, 3, 0), true)
+                setStatus("Teleported to Treadmill!")
+            end
+            break
+        end
+    end
+end)
+
+createButton(TeleportCard, "Teleport: Safe Zone", function()
+    local safeBoundary = workspace:FindFirstChild("SafeZoneBoundary")
+    if safeBoundary then
+        teleportTo(safeBoundary:GetPivot().Position + Vector3.new(0, 3, 0), true)
+        setStatus("Teleported to Safe Zone!")
+    else
+        local _, plotCF = getPlotFloorPosition()
+        if plotCF then
+            teleportTo(plotCF + Vector3.new(0, 3, 0), true)
         end
     end
 end)
@@ -1920,14 +2046,15 @@ ExtraLayout.Padding = UDim.new(0, 10)
 ExtraLayout.Parent = ExtraTab
 
 local CombatCard = createCard(ExtraTab, "Combat & Survival", "⚔")
-createToggle(CombatCard, "Anti-Ragdoll / No Tripping", Config.AntiRagdoll, function(v)
+createToggle(CombatCard, "Anti-Ragdoll / Trap Immunity", Config.AntiRagdoll, function(v)
     Config.AntiRagdoll = v
 end)
 createToggle(CombatCard, "Auto Bat Aura (Anti-Guard)", Config.AutoBatAura, function(v)
     Config.AutoBatAura = v
 end)
-createToggle(CombatCard, "Invisible / Ghost Mode", Config.InvisibleGhost, function(v)
+createToggle(CombatCard, "Invisible / Ghost Mode (FE Replicated)", Config.InvisibleGhost, function(v)
     Config.InvisibleGhost = v
+    updateFEInvisibility(v)
 end)
 
 local AutomationCard = createCard(ExtraTab, "Extra Automation", "⚙")
@@ -1937,95 +2064,102 @@ createToggle(AutomationCard, "Auto Claim Free Group Gift", Config.AutoClaimFreeG
         pcall(function() FreeGiftClaimRemote:InvokeServer() end)
     end
 end)
-createToggle(AutomationCard, "Anti-AFK (20min Kick Bypass)", Config.AntiAFK, function(v)
-    Config.AntiAFK = v
-end)
 
-local MovementCard = createCard(ExtraTab, "Movement & Mobility", "⚡")
-createToggle(MovementCard, "Custom WalkSpeed (Fast)", Config.CustomSpeedEnabled, function(v)
+local MovementCard = createCard(ExtraTab, "Movement & Character", "⚡")
+createToggle(MovementCard, "Noclip Through Walls", Config.Noclip, function(v)
+    Config.Noclip = v
+end)
+createToggle(MovementCard, "Custom WalkSpeed (Fast Run)", Config.CustomSpeedEnabled, function(v)
     Config.CustomSpeedEnabled = v
-    Config.WalkSpeedValue = v and 38 or 16
     local hum = getHumanoid()
-    if hum then hum.WalkSpeed = Config.WalkSpeedValue end
+    if hum then hum.WalkSpeed = v and Config.WalkSpeedValue or 16 end
 end)
 createToggle(MovementCard, "Infinite Jump", Config.InfiniteJump, function(v)
     Config.InfiniteJump = v
 end)
-createToggle(MovementCard, "Noclip (Walk Through Walls)", Config.Noclip, function(v)
-    Config.Noclip = v
-end)
 
 ---------------------------------------------------------------------------
--- POPULATE VISUALS TAB
----------------------------------------------------------------------------
-local VisualsLayout = Instance.new("UIListLayout")
-VisualsLayout.Padding = UDim.new(0, 10)
-VisualsLayout.Parent = VisualsTab
-
-local VisualCard = createCard(VisualsTab, "ESP Configuration", "👁")
-createToggle(VisualCard, "Egg ESP Master Toggle", Config.EggESP, function(v)
-    Config.EggESP = v
-end)
-createDropdown(VisualCard, "Active ESP Rarities", RARITIES, Config.ESPRarityFilters, true, function(selected)
-    Config.ESPRarityFilters = selected
-end)
-
----------------------------------------------------------------------------
--- POPULATE TELEPORT TAB
----------------------------------------------------------------------------
-local TeleportLayout = Instance.new("UIListLayout")
-TeleportLayout.Padding = UDim.new(0, 10)
-TeleportLayout.Parent = TeleportTab
-
-local TPQuickCard = createCard(TeleportTab, "Quick Teleports", "🚀")
-createButton(TPQuickCard, "Teleport: My Base / Plot", function()
-    local _, plotCF = getPlotFloorPosition()
-    if plotCF then teleportTo(plotCF + Vector3.new(0, 3, 0)) end
-end)
-createButton(TPQuickCard, "Teleport: Treadmill Conveyor", function()
-    for _, tm in ipairs(CollectionService:GetTagged("Treadmill")) do
-        if tm:GetAttribute("OwnerUserId") == LocalPlayer.UserId then
-            local conveyor = tm:FindFirstChild("Conveyor")
-            if conveyor then teleportTo(conveyor.CFrame + Vector3.new(0, 3, 0)) end
-            break
-        end
-    end
-end)
-createButton(TPQuickCard, "Teleport: Safe Zone", function()
-    local safeBoundary = workspace:FindFirstChild("SafeZoneBoundary")
-    if safeBoundary then
-        teleportTo(safeBoundary:GetPivot().Position + Vector3.new(0, 3, 0))
-    else
-        local _, plotCF = getPlotFloorPosition()
-        if plotCF then teleportTo(plotCF + Vector3.new(0, 3, 0)) end
-    end
-end)
-
-local TPZoneCard = createCard(TeleportTab, "Teleport to All Danger Zones", "🗺")
-for _, zoneName in ipairs(ZONES) do
-    createButton(TPZoneCard, "Zone: " .. zoneName, function()
-        local dz = workspace:FindFirstChild("DangerZones")
-        if dz then
-            for _, z in ipairs(dz:GetChildren()) do
-                local zName = z:GetAttribute("ZoneName") or z.Name
-                if string.upper(zName):find(zoneName) or zoneName:find(string.upper(zName)) then
-                    local startX = z:GetAttribute("StartX") or 0
-                    local endX = z:GetAttribute("EndX") or startX + 50
-                    local centerZ = dz:GetAttribute("CenterZ") or 0
-                    teleportTo(Vector3.new((startX + endX) / 2, 8, centerZ))
-                    break
-                end
-            end
-        end
-    end)
-end
-
----------------------------------------------------------------------------
--- POPULATE SETTINGS TAB
+-- POPULATE SETTINGS TAB (Configuration Presets & General Settings)
 ---------------------------------------------------------------------------
 local SettingsLayout = Instance.new("UIListLayout")
 SettingsLayout.Padding = UDim.new(0, 10)
 SettingsLayout.Parent = SettingsTab
+
+local PresetCard = createCard(SettingsTab, "Configuration Presets", "💾")
+local PRESET_FILE = "Alexandria_StealKPOPEggs_Config.json"
+
+local function savePreset()
+    local success, err = pcall(function()
+        local data = HttpService:JSONEncode(Config)
+        if writefile then
+            writefile(PRESET_FILE, data)
+        else
+            getgenv().AlexandriaSavedPreset = data
+        end
+    end)
+    if success then
+        setStatus("Preset Saved successfully to file!")
+    else
+        setStatus("Failed to save preset: " .. tostring(err))
+    end
+end
+
+local function loadPreset()
+    local success, content = pcall(function()
+        if readfile and isfile and isfile(PRESET_FILE) then
+            return readfile(PRESET_FILE)
+        elseif getgenv and getgenv().AlexandriaSavedPreset then
+            return getgenv().AlexandriaSavedPreset
+        end
+        error("No preset file found!")
+    end)
+    if success and content then
+        local decodeSuccess, loadedConfig = pcall(function()
+            return HttpService:JSONDecode(content)
+        end)
+        if decodeSuccess and type(loadedConfig) == "table" then
+            for k, v in pairs(loadedConfig) do
+                Config[k] = v
+            end
+            setStatus("Preset Loaded successfully!")
+        else
+            setStatus("Failed: Preset data corrupted!")
+        end
+    else
+        setStatus("No saved preset file found!")
+    end
+end
+
+local function resetDefaults()
+    Config.AutoStealEggs = false
+    Config.SnipeAdminEggs = true
+    Config.StealZoneFilters = getDefaultZoneTable()
+    Config.StealRarityFilters = getDefaultRarityTable()
+    Config.StealPriority = "Nearest"
+    Config.AutoPlaceEggs = false
+    Config.PlaceRarityFilters = getDefaultRarityTable()
+    Config.AutoHatch = false
+    Config.AutoEquipBest = false
+    Config.AutoGoOnTreadmill = false
+    Config.AutoUpgradeTreadmill = false
+    Config.AutoUpgradeBase = false
+    Config.AutoClaimIndex = false
+    Config.AutoClaimDaily = false
+    Config.AutoBuyTrail = false
+    Config.AutoBuyCosmetics = false
+    Config.EggESP = false
+    Config.ESPRarityFilters = getDefaultRarityTable()
+    Config.AntiRagdoll = true
+    Config.AutoBatAura = false
+    Config.InvisibleGhost = false
+    updateFEInvisibility(false)
+    Config.SafeTravelMode = false
+    setStatus("Settings reset to defaults.")
+end
+
+createButton(PresetCard, "💾 Save Current Preset", savePreset)
+createButton(PresetCard, "📂 Load Saved Preset", loadPreset)
+createButton(PresetCard, "🔄 Reset to Default Settings", resetDefaults)
 
 local GeneralSettings = createCard(SettingsTab, "General Settings", "⚙")
 createToggle(GeneralSettings, "Safe Travel Mode (Anti-Detect Tween)", Config.SafeTravelMode, function(v)
@@ -2038,25 +2172,37 @@ createButton(GeneralSettings, "Toggle UI Visibility (or Press RightShift)", func
     MainFrame.Visible = not MainFrame.Visible
 end)
 createButton(GeneralSettings, "Unload Script & Destroy GUI", function()
+    Config.EggESP = false
+    for obj in pairs(ActiveESPs) do clearESP(obj) end
+    if isInvisibleActive then updateFEInvisibility(false) end
     ScreenGui:Destroy()
-    for obj in pairs(ActiveESPs) do
-        clearESP(obj)
-    end
-    print("[Alexandria] Suite cleanly unloaded.")
 end)
 
--- Keybind to toggle UI (RightShift)
+-- Keybind: RightShift to toggle UI
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
-        if MainFrame.Visible then
-            MainFrame.Visible = false
-            FloatingIcon.Visible = true
-        else
+        MainFrame.Visible = not MainFrame.Visible
+        if FloatingIcon.Visible then
             FloatingIcon.Visible = false
-            MainFrame.Visible = true
-            MainFrame.Size = UDim2.fromOffset(780, 500)
         end
     end
 end)
 
-print("[Alexandria] Steal KPOP Eggs Suite Loaded Successfully! Press RightShift to toggle UI.")
+---------------------------------------------------------------------------
+-- STARTUP NOTIFICATION
+---------------------------------------------------------------------------
+print([[
+    ╔═══════════════════════════════════════════════════════════╗
+    ║       ALEXANDRIA MAIN — STEAL KPOP EGGS LOADED!           ║
+    ║       UI Hotkey: RightShift                               ║
+    ║       Version: 3.2.0 (Enhanced Edition)                   ║
+    ╚═══════════════════════════════════════════════════════════╝
+]])
+
+pcall(function()
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = "Alexandria Main",
+        Text = "Loaded successfully! Press RightShift or use floating icon.",
+        Duration = 5
+    })
+end)
