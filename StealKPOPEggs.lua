@@ -1,7 +1,7 @@
 --[[
     ═══════════════════════════════════════════════════════════════════════════
        ALEXANDRIA MAIN — STEAL KPOP EGGS ULTIMATE AUTOMATION SUITE
-       Version: 3.2.0 (Enhanced Edition)
+       Version: 3.3.0 (Streamlined & Rapid Edition)
        Design: Faithful Recreation of Alexandria Hub Layout & Features
        Target Game: Steal KPOP Eggs
     ═══════════════════════════════════════════════════════════════════════════
@@ -71,6 +71,7 @@ end
 ---------------------------------------------------------------------------
 local CasePlacementFolder   = ReplicatedStorage:WaitForChild("CasePlacement", 10)
 local PlaceRemote           = CasePlacementFolder and CasePlacementFolder:WaitForChild("Place", 10)
+local DropAlbumRemote       = CasePlacementFolder and CasePlacementFolder:WaitForChild("DropAlbum", 10)
 local BaseUpgradeRequest    = CasePlacementFolder and CasePlacementFolder:WaitForChild("BaseUpgradeRequest", 10)
 local HatchPortraitReady    = CasePlacementFolder and CasePlacementFolder:WaitForChild("HatchPortraitReady", 10)
 
@@ -118,7 +119,8 @@ local ZONES = {
     "CHERRYBLOSSOM",
     "GLITCH",
     "CELESTIAL",
-    "HARVESTFARM"
+    "HARVESTFARM",
+    "MEDIEVALMARKET"
 }
 
 local RARITIES = {
@@ -191,12 +193,58 @@ local function getDefaultRarityTable()
 end
 
 ---------------------------------------------------------------------------
+-- WEIGHT (KG) FORMATTING HELPER
+---------------------------------------------------------------------------
+local function formatKg(weight)
+    local w = tonumber(weight) or 0
+    if w <= 0 then return nil end
+    if w < 9.995 then
+        return string.format("%.2f kg", w)
+    elseif w < 999.95 then
+        return string.format("%.1f kg", w)
+    else
+        local rounded = math.round(w)
+        return tostring(rounded):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "") .. " kg"
+    end
+end
+
+local function getEggWeight(egg)
+    local w = egg:GetAttribute("AlbumWeightKg") 
+           or (egg.Parent and egg.Parent:GetAttribute("AlbumWeightKg"))
+           or egg:GetAttribute("Weight")
+    if type(w) == "number" and w > 0 then
+        return w
+    end
+    local label = egg:FindFirstChild("AlbumWeightLabel", true)
+    if label and label:IsA("BillboardGui") then
+        local text = label:FindFirstChildWhichIsA("TextLabel", true)
+        if text and text.Text then
+            local kgStr = text.Text:match("([%d%,%.]+)%s*[kK][gG]") or text.Text:match("•%s*([%d%,%.]+)")
+            if kgStr then
+                kgStr = kgStr:gsub(",", "")
+                local num = tonumber(kgStr)
+                if num and num > 0 then return num end
+            end
+        end
+    end
+    local sz = egg:GetAttribute("AlbumSize") or egg:GetAttribute("Size")
+    if type(sz) == "number" and sz > 0 then
+        local cSz = math.clamp(sz, 0.3, 5)
+        local raw = 9999 * (cSz / 5) ^ 3.9
+        local rawMin = 9999 * (0.3 / 5) ^ 3.9
+        local calculated = 1 + (raw - rawMin) * (9999 - 1) / (9999 - rawMin)
+        return calculated
+    end
+    return nil
+end
+
+---------------------------------------------------------------------------
 -- CONFIGURATION & STATE
 ---------------------------------------------------------------------------
 local Config = {
     -- Auto Steal Eggs
     AutoStealEggs       = false,
-    SnipeAdminEggs      = true, -- Prioritize Admin & Exclusive Eggs across entire world
+    SnipeAdminEggs      = false, -- Default UNCHECKED as requested
     StealZoneFilters    = getDefaultZoneTable(), -- All zones active by default
     StealRarityFilters  = getDefaultRarityTable(), -- All rarities active by default
     StealPriority       = "Nearest", -- "Nearest", "Biggest", "Random"
@@ -219,26 +267,16 @@ local Config = {
     AutoBuyTrail        = false,
     AutoBuyCosmetics    = false,
 
-    -- Egg ESP
+    -- Egg ESP (Full map range, clean text with KG)
     EggESP              = false,
     ESPRarityFilters    = getDefaultRarityTable(),
 
-    -- Extra Systems
-    AutoClaimFreeGift   = false,
+    -- Background protections
     AntiRagdoll         = true,
-    AutoBatAura         = false,
-    InvisibleGhost      = false, -- True FE Server Invisibility
-    GuardESP            = false,
-    PlayerESP           = false,
-    AutoSellJunk        = false,
-    WalkSpeedValue      = 16,
-    CustomSpeedEnabled  = false,
-    InfiniteJump        = false,
-    Noclip              = false,
     AntiAFK             = true,
 
     -- Movement mode
-    SafeTravelMode      = false, -- Instant warp by default
+    SafeTravelMode      = false, -- Direct CFrame instant warp
     TweenSpeed          = 80,
     HumanizeDelays      = false,
 
@@ -361,11 +399,10 @@ local function getEggRarity(egg)
     local r = egg:GetAttribute("RarityAura") or egg:GetAttribute("AlbumRarity") or egg:GetAttribute("Rarity")
     if r and RARITY_TIERS[r] then return r end
     
-    -- Check billboard label
     local label = egg:FindFirstChild("AlbumWeightLabel", true)
     if label and label:IsA("BillboardGui") then
         local text = label:FindFirstChildWhichIsA("TextLabel", true)
-        if text then
+        if text and text.Text then
             if text.Text:find("ADMIN") then return "Admin" end
             for rarityName in pairs(RARITY_TIERS) do
                 if text.Text:find(rarityName) then return rarityName end
@@ -395,7 +432,7 @@ local function isEggObject(obj)
     return false
 end
 
--- Comprehensive egg discovery across ALL locations
+-- Comprehensive egg discovery across ALL locations with KG extraction
 local function getAllEggs()
     local results = {}
     local seen = {}
@@ -417,15 +454,19 @@ local function getAllEggs()
         local rarity = rarityOverride or getEggRarity(item)
         local zone = zoneOverride or getEggZone(item)
         local name = item:GetAttribute("EggName") or item:GetAttribute("AlbumType") or item.Name
+        local weight = getEggWeight(item)
+        local weightFormatted = formatKg(weight)
 
         table.insert(results, {
-            Object   = item,
-            Position = pivot.Position,
-            CFrame   = pivot,
-            Zone     = zone,
-            Rarity   = rarity,
-            Tier     = RARITY_TIERS[rarity] or 1,
-            Name     = name
+            Object          = item,
+            Position        = pivot.Position,
+            CFrame          = pivot,
+            Zone            = zone,
+            Rarity          = rarity,
+            Tier            = RARITY_TIERS[rarity] or 1,
+            Name            = name,
+            Weight          = weight,
+            WeightFormatted = weightFormatted
         })
     end
 
@@ -570,114 +611,145 @@ end
 -- CORE ENGINE SERVICES
 ---------------------------------------------------------------------------
 
--- 1. AUTO STEAL EGGS SERVICE (Direct Warp To Egg -> Collect -> Direct Warp To Plot)
+-- 1. AUTO STEAL EGGS SERVICE (Fast Chaining + Hold Confirmation)
+local isStealingActive = false
+
 task.spawn(function()
     while true do
-        task.wait(0.2)
-        if Config.AutoStealEggs then
+        task.wait(0.05)
+        if Config.AutoStealEggs and not isStealingActive then
             local root = getRootPart()
             if not root then
                 task.wait(0.5)
                 continue
             end
 
-            -- If currently carrying stolen egg, warp back to plot
+            -- If already holding stolen egg, warp back to plot and secure it first
             if isCarryingEgg() then
-                setStatus("Securing Egg: Warping to Plot...")
+                setStatus("Securing held egg: Warping to Plot...")
                 local _, plotCF = getPlotFloorPosition()
                 if plotCF then
                     root.CFrame = plotCF + Vector3.new(0, 3, 0)
-                    task.wait(0.8)
-                    for _ = 1, 15 do
+                    task.wait(0.08)
+                    if DropAlbumRemote then
+                        pcall(function() DropAlbumRemote:FireServer() end)
+                    end
+                    for _ = 1, 8 do
                         if not isCarryingEgg() then break end
-                        task.wait(0.2)
+                        task.wait(0.05)
                     end
-                else
-                    setStatus("Warning: No owned plot found!")
-                    task.wait(1)
                 end
+                continue
+            end
+
+            local eggs = {}
+
+            -- Dedicated Admin & Exclusive Global Sniper Check (when enabled)
+            if Config.SnipeAdminEggs then
+                local adminEggs = getAdminAndExclusiveEggs()
+                if #adminEggs > 0 then
+                    eggs = adminEggs
+                    setStatus("⚡ Admin Egg detected! Sniping...")
+                end
+            end
+
+            if #eggs == 0 then
+                eggs = getAllEligibleEggs()
+            end
+
+            if #eggs == 0 then
+                setStatus("No matching eggs found. Waiting...")
+                task.wait(0.5)
             else
-                local eggs = {}
+                local myPos = root.Position
+                local target = nil
 
-                -- Dedicated Admin & Exclusive Global Sniper Check
-                if Config.SnipeAdminEggs then
-                    local adminEggs = getAdminAndExclusiveEggs()
-                    if #adminEggs > 0 then
-                        eggs = adminEggs
-                        setStatus("⚡ Admin Egg detected! Sniping...")
-                    end
-                end
-
-                if #eggs == 0 then
-                    eggs = getAllEligibleEggs()
-                end
-
-                if #eggs == 0 then
-                    setStatus("No matching eggs found. Waiting...")
-                    task.wait(0.8)
-                else
-                    local myPos = root.Position
-                    local target = nil
-
-                    if Config.StealPriority == "Biggest" then
-                        table.sort(eggs, function(a, b)
-                            local szA = getEggSize(a.Object)
-                            local szB = getEggSize(b.Object)
-                            if szA == szB then
-                                return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
-                            end
-                            return szA > szB
-                        end)
-                        target = eggs[1]
-                    elseif Config.StealPriority == "Random" then
-                        target = eggs[math.random(1, #eggs)]
-                    else -- "Nearest"
-                        table.sort(eggs, function(a, b)
+                if Config.StealPriority == "Biggest" then
+                    table.sort(eggs, function(a, b)
+                        local wA = a.Weight or getEggSize(a.Object)
+                        local wB = b.Weight or getEggSize(b.Object)
+                        if wA == wB then
                             return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
-                        end)
-                        target = eggs[1]
+                        end
+                        return wA > wB
+                    end)
+                    target = eggs[1]
+                elseif Config.StealPriority == "Random" then
+                    target = eggs[math.random(1, #eggs)]
+                else -- "Nearest"
+                    table.sort(eggs, function(a, b)
+                        return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
+                    end)
+                    target = eggs[1]
+                end
+
+                if target and target.Object and target.Object.Parent then
+                    isStealingActive = true
+                    local targetLabel = tostring(target.Name) .. " (" .. target.Rarity .. (target.WeightFormatted and (" • " .. target.WeightFormatted) or "") .. ")"
+                    setStatus("Warping to " .. targetLabel .. "...")
+                    
+                    -- 1. Direct instant CFrame warp to egg
+                    root.CFrame = target.CFrame + Vector3.new(0, 2, 0)
+                    task.wait(0.08)
+
+                    -- 2. Find ProximityPrompt inside egg or touch fallback
+                    local prompt = target.Object:FindFirstChildWhichIsA("ProximityPrompt", true)
+                    if not prompt then
+                        local casePart = target.Object:FindFirstChild("CasePart")
+                        if casePart then
+                            prompt = casePart:FindFirstChildWhichIsA("ProximityPrompt", true)
+                        end
                     end
 
-                    if target and target.Object and target.Object.Parent then
-                        setStatus("Warping to " .. tostring(target.Name) .. " (" .. target.Rarity .. ")...")
-                        
-                        -- Direct instant CFrame warp to egg
-                        root.CFrame = target.CFrame + Vector3.new(0, 2, 0)
-                        task.wait(0.12)
-
-                        -- Find ProximityPrompt inside egg
-                        local prompt = target.Object:FindFirstChildWhichIsA("ProximityPrompt", true)
-                        if not prompt then
-                            local casePart = target.Object:FindFirstChild("CasePart")
-                            if casePart then
-                                prompt = casePart:FindFirstChildWhichIsA("ProximityPrompt", true)
-                            end
+                    if prompt then
+                        safeFireProximityPrompt(prompt)
+                    else
+                        local part = target.Object:FindFirstChildWhichIsA("BasePart", true)
+                        if part and root and firetouchinterest then
+                            firetouchinterest(root, part, 0)
+                            task.wait(0.04)
+                            firetouchinterest(root, part, 1)
                         end
+                    end
 
-                        if prompt then
+                    -- 3. HOLD CONFIRMATION: Ensure egg is actually picked up before warping back
+                    local gotEgg = false
+                    for _ = 1, 15 do
+                        if isCarryingEgg() then
+                            gotEgg = true
+                            break
+                        end
+                        if prompt and not prompt.RequiresLineOfSight then
                             safeFireProximityPrompt(prompt)
-                            task.wait(0.25)
-                        else
-                            local part = target.Object:FindFirstChildWhichIsA("BasePart", true)
-                            if part and root and firetouchinterest then
-                                firetouchinterest(root, part, 0)
-                                task.wait(0.05)
-                                firetouchinterest(root, part, 1)
-                            end
+                        end
+                        task.wait(0.08)
+                    end
+
+                    -- 4. Warp back to owned plot floor once confirmed
+                    local _, plotCF = getPlotFloorPosition()
+                    if plotCF then
+                        root.CFrame = plotCF + Vector3.new(0, 3, 0)
+                        task.wait(0.08)
+
+                        -- Immediately drop/secure album at base
+                        if DropAlbumRemote then
+                            pcall(function() DropAlbumRemote:FireServer() end)
                         end
 
-                        -- Immediately warp back to owned plot floor
-                        local _, plotCF = getPlotFloorPosition()
-                        if plotCF then
-                            root.CFrame = plotCF + Vector3.new(0, 3, 0)
-                            setStatus("Egg grabbed! Warped back to plot.")
+                        for _ = 1, 6 do
+                            if not isCarryingEgg() then break end
+                            task.wait(0.05)
                         end
-                        task.wait(0.8)
+                        setStatus("Egg secured at base! Chaining next...")
                     end
+
+                    -- 5. Rapid chaining: immediately ready for next egg
+                    task.wait(0.05)
+                    isStealingActive = false
                 end
             end
         else
-            if Config.StealStatus ~= "Idle" then
+            if not Config.AutoStealEggs and Config.StealStatus ~= "Idle" then
                 setStatus("Idle")
             end
         end
@@ -914,7 +986,7 @@ task.spawn(function()
     end
 end)
 
--- 7. COMBAT & SURVIVAL: BEAR TRAP IMMUNITY & ANTI-RAGDOLL
+-- 7. PASSIVE BEAR TRAP & RAGDOLL IMMUNITY
 local function neutralizeTraps()
     for _, trap in ipairs(workspace:GetDescendants()) do
         if trap:IsA("Model") and (trap.Name:find("BearTrap") or trap.Name:find("Trap") or trap:GetAttribute("BearTrapTool") ~= nil) then
@@ -976,131 +1048,7 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
--- 8. AUTO BAT AURA
-task.spawn(function()
-    while true do
-        task.wait(0.3)
-        if Config.AutoBatAura and BatSwingRemote then
-            local root = getRootPart()
-            local char = getCharacter()
-            if root and char then
-                local bat = char:FindFirstChildWhichIsA("Tool")
-                if not (bat and (bat.Name:find("Bat") or bat:GetAttribute("IsBat") == true)) then
-                    local bp = LocalPlayer:FindFirstChild("Backpack")
-                    if bp then
-                        for _, item in ipairs(bp:GetChildren()) do
-                            if item:IsA("Tool") and (item.Name:find("Bat") or item:GetAttribute("IsBat") == true) then
-                                getHumanoid():EquipTool(item)
-                                bat = item
-                                break
-                            end
-                        end
-                    end
-                end
-
-                if bat then
-                    local targets = {}
-                    local dz = workspace:FindFirstChild("DangerZones")
-                    if dz then
-                        for _, desc in ipairs(dz:GetDescendants()) do
-                            if desc:IsA("Model") and (desc.Name:find("Guard") or desc.Name:find("Chicken") or desc.Name:find("Scorpion") or desc.Name:find("Tiger")) then
-                                local gRoot = desc:FindFirstChild("HumanoidRootPart") or desc:FindFirstChildWhichIsA("BasePart")
-                                if gRoot and (gRoot.Position - root.Position).Magnitude <= 18 then
-                                    table.insert(targets, desc)
-                                end
-                            end
-                        end
-                    end
-                    if #targets > 0 then
-                        pcall(function()
-                            BatSwingRemote:FireServer(bat, targets)
-                        end)
-                    end
-                end
-            end
-        end
-    end
-end)
-
--- 9. FE SERVER REPLICATED INVISIBILITY
-local origRootC0 = nil
-local isInvisibleActive = false
-
-local function updateFEInvisibility(state)
-    local char = getCharacter()
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    local rootJoint = root and (root:FindFirstChild("RootJoint") or char:FindFirstChild("RootJoint", true))
-    
-    if state then
-        if rootJoint and not isInvisibleActive then
-            origRootC0 = rootJoint.C0
-            isInvisibleActive = true
-            -- Offsets character body 999,999 studs underground for all other players across server
-            rootJoint.C0 = origRootC0 * CFrame.new(0, -999999, 0)
-        end
-        -- Semi-transparent locally so player can navigate comfortably
-        for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") or part:IsA("Decal") then
-                part.LocalTransparencyModifier = 0.5
-            end
-        end
-    else
-        if rootJoint and isInvisibleActive and origRootC0 then
-            rootJoint.C0 = origRootC0
-            origRootC0 = nil
-            isInvisibleActive = false
-        end
-        for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") or part:IsA("Decal") then
-                part.LocalTransparencyModifier = 0
-            end
-        end
-    end
-end
-
-LocalPlayer.CharacterAdded:Connect(function(newChar)
-    isInvisibleActive = false
-    origRootC0 = nil
-    if Config.InvisibleGhost then
-        task.wait(0.5)
-        updateFEInvisibility(true)
-    end
-end)
-
--- 10. NOCLIP, SPEED, JUMP, ANTI-AFK
-RunService.Stepped:Connect(function()
-    if Config.Noclip then
-        local char = getCharacter()
-        if char then
-            for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.CanCollide = false
-                end
-            end
-        end
-    end
-end)
-
-task.spawn(function()
-    while true do
-        task.wait(0.2)
-        local hum = getHumanoid()
-        if hum and Config.CustomSpeedEnabled then
-            hum.WalkSpeed = Config.WalkSpeedValue
-        end
-    end
-end)
-
-UserInputService.JumpRequest:Connect(function()
-    if Config.InfiniteJump then
-        local hum = getHumanoid()
-        if hum then
-            hum:ChangeState(Enum.HumanoidStateType.Jumping)
-        end
-    end
-end)
-
+-- 8. ANTI-AFK
 if Config.AntiAFK then
     LocalPlayer.Idled:Connect(function()
         VirtualUser:CaptureController()
@@ -1119,14 +1067,13 @@ ScreenGui.DisplayOrder = 9999
 ScreenGui.Parent = getGuiParent()
 
 ---------------------------------------------------------------------------
--- EGG ESP SERVICE (Renders directly into ScreenGui for 100% visibility)
+-- EGG ESP SERVICE (Infinite Range, No Box/Border, No Distance, Shows KG)
 ---------------------------------------------------------------------------
 local ActiveESPs = {}
 
 local function clearESP(obj)
     if ActiveESPs[obj] then
         pcall(function()
-            if ActiveESPs[obj].Highlight then ActiveESPs[obj].Highlight:Destroy() end
             if ActiveESPs[obj].Billboard then ActiveESPs[obj].Billboard:Destroy() end
         end)
         ActiveESPs[obj] = nil
@@ -1141,11 +1088,9 @@ local function updateEggESP()
         return
     end
 
-    local root = getRootPart()
-    local myPos = root and root.Position or Vector3.new(0, 0, 0)
     local eggs = getAllEggs()
-
     local seen = {}
+
     for _, eggInfo in ipairs(eggs) do
         local obj = eggInfo.Object
         seen[obj] = true
@@ -1153,26 +1098,12 @@ local function updateEggESP()
         local showRarity = (next(Config.ESPRarityFilters) == nil) or (Config.ESPRarityFilters[eggInfo.Rarity] == true)
 
         if showRarity then
-            local dist = math.floor((eggInfo.Position - myPos).Magnitude)
             local color = RARITY_COLORS[eggInfo.Rarity] or Color3.fromRGB(255, 255, 255)
 
             if not ActiveESPs[obj] then
                 local adorneePart = (obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChild("CasePart") or obj:FindFirstChildWhichIsA("BasePart"))) 
                     or (obj:IsA("Tool") and (obj:FindFirstChild("Handle") or obj:FindFirstChildWhichIsA("BasePart"))) 
                     or (obj:IsA("BasePart") and obj)
-
-                local hl = nil
-                pcall(function()
-                    hl = Instance.new("Highlight")
-                    hl.Name = "Alexandria_EggESP"
-                    hl.Adornee = obj
-                    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                    hl.FillColor = color
-                    hl.OutlineColor = color
-                    hl.FillTransparency = 0.65
-                    hl.OutlineTransparency = 0
-                    hl.Parent = ScreenGui
-                end)
 
                 local bb = nil
                 local infoLabel = nil
@@ -1181,58 +1112,64 @@ local function updateEggESP()
                         bb = Instance.new("BillboardGui")
                         bb.Name = "Alexandria_EggLabel"
                         bb.Adornee = adorneePart
-                        bb.Size = UDim2.fromOffset(170, 44)
-                        bb.StudsOffset = Vector3.new(0, 3.0, 0)
+                        bb.Size = UDim2.fromOffset(180, 36)
+                        bb.StudsOffset = Vector3.new(0, 2.5, 0)
                         bb.AlwaysOnTop = true
-                        bb.MaxDistance = 5000
+                        bb.MaxDistance = math.huge -- Infinite view distance
+                        bb.LightInfluence = 0
+                        bb.Active = false
                         bb.Parent = ScreenGui
 
-                        local frame = Instance.new("Frame")
-                        frame.Size = UDim2.fromScale(1, 1)
-                        frame.BackgroundTransparency = 0.35
-                        frame.BackgroundColor3 = Color3.fromRGB(15, 16, 22)
-                        frame.BorderSizePixel = 0
-                        frame.Parent = bb
-
-                        local uic = Instance.new("UICorner")
-                        uic.CornerRadius = UDim.new(0, 6)
-                        uic.Parent = frame
-
-                        local uis = Instance.new("UIStroke")
-                        uis.Color = color
-                        uis.Thickness = 1.5
-                        uis.Parent = frame
+                        -- Borderless, transparent container (No Highlight box, No border)
+                        local container = Instance.new("Frame")
+                        container.Size = UDim2.fromScale(1, 1)
+                        container.BackgroundTransparency = 1
+                        container.BorderSizePixel = 0
+                        container.Parent = bb
 
                         local nameLabel = Instance.new("TextLabel")
                         nameLabel.Name = "Title"
-                        nameLabel.Size = UDim2.new(1, -8, 0, 18)
-                        nameLabel.Position = UDim2.fromOffset(4, 2)
+                        nameLabel.Size = UDim2.new(1, 0, 0, 18)
+                        nameLabel.Position = UDim2.fromOffset(0, 0)
                         nameLabel.BackgroundTransparency = 1
                         nameLabel.Font = Enum.Font.GothamBold
-                        nameLabel.TextSize = 12
+                        nameLabel.TextSize = 13
                         nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+                        nameLabel.TextStrokeTransparency = 0.2
+                        nameLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
                         nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
                         nameLabel.Text = eggInfo.Name
-                        nameLabel.Parent = frame
+                        nameLabel.Parent = container
 
                         infoLabel = Instance.new("TextLabel")
                         infoLabel.Name = "Info"
-                        infoLabel.Size = UDim2.new(1, -8, 0, 16)
-                        infoLabel.Position = UDim2.fromOffset(4, 20)
+                        infoLabel.Size = UDim2.new(1, 0, 0, 16)
+                        infoLabel.Position = UDim2.fromOffset(0, 18)
                         infoLabel.BackgroundTransparency = 1
-                        infoLabel.Font = Enum.Font.Gotham
+                        infoLabel.Font = Enum.Font.GothamMedium
                         infoLabel.TextSize = 11
                         infoLabel.TextColor3 = color
-                        infoLabel.Text = string.format("[%s] %s • %dm", eggInfo.Zone, eggInfo.Rarity, dist)
-                        infoLabel.Parent = frame
+                        infoLabel.TextStrokeTransparency = 0.3
+                        infoLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+
+                        if eggInfo.WeightFormatted then
+                            infoLabel.Text = string.format("[%s] %s • %s", eggInfo.Zone, eggInfo.Rarity, eggInfo.WeightFormatted)
+                        else
+                            infoLabel.Text = string.format("[%s] %s", eggInfo.Zone, eggInfo.Rarity)
+                        end
+                        infoLabel.Parent = container
                     end)
                 end
 
-                ActiveESPs[obj] = { Highlight = hl, Billboard = bb, InfoLabel = infoLabel, Color = color }
+                ActiveESPs[obj] = { Billboard = bb, InfoLabel = infoLabel, Color = color }
             else
                 local info = ActiveESPs[obj]
                 if info.InfoLabel and info.InfoLabel.Parent then
-                    info.InfoLabel.Text = string.format("[%s] %s • %dm", eggInfo.Zone, eggInfo.Rarity, dist)
+                    if eggInfo.WeightFormatted then
+                        info.InfoLabel.Text = string.format("[%s] %s • %s", eggInfo.Zone, eggInfo.Rarity, eggInfo.WeightFormatted)
+                    else
+                        info.InfoLabel.Text = string.format("[%s] %s", eggInfo.Zone, eggInfo.Rarity)
+                    end
                 end
             end
         else
@@ -1464,11 +1401,11 @@ FooterBuild.Font = Enum.Font.Gotham
 FooterBuild.TextSize = 11
 FooterBuild.TextXAlignment = Enum.TextXAlignment.Right
 FooterBuild.TextColor3 = Color3.fromRGB(80, 85, 105)
-FooterBuild.Text = "Alexandria v3.2 (Enhanced)"
+FooterBuild.Text = "Alexandria v3.3"
 FooterBuild.Parent = Footer
 
 ---------------------------------------------------------------------------
--- TAB SYSTEM (Main, Extra, Settings ONLY)
+-- TAB SYSTEM (Main & Settings ONLY — Exactly matching picture-1.png)
 ---------------------------------------------------------------------------
 local Tabs = {}
 local TabButtons = {}
@@ -1519,7 +1456,6 @@ local function createTab(tabName, iconText)
 end
 
 local MainTab     = createTab("Main", "◎")
-local ExtraTab    = createTab("Extra", "✦")
 local SettingsTab = createTab("Settings", "⚙")
 
 Tabs["Main"].Visible = true
@@ -1682,7 +1618,7 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
 
     local listContainer = Instance.new("ScrollingFrame")
     listContainer.Name = "DropdownList"
-    listContainer.Size = UDim2.new(1, 0, 0, 130)
+    listContainer.Size = UDim2.new(1, 0, 0, 150)
     listContainer.Position = UDim2.fromOffset(0, 50)
     listContainer.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
     listContainer.BackgroundTransparency = 0
@@ -1721,21 +1657,26 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
     listPad.Parent = listContainer
 
     local selectedState = isMulti and (defaultSelected or {}) or (defaultSelected or options[1])
+    local optionButtons = {}
 
     local function updateButtonText()
         if isMulti then
+            local count = 0
             local names = {}
-            for k, v in pairs(selectedState) do
-                if v then table.insert(names, k) end
+            for _, opt in ipairs(options) do
+                if selectedState[opt] then
+                    count = count + 1
+                    table.insert(names, opt)
+                end
             end
-            if #names == 0 then
+            if count == 0 then
                 selectBtn.Text = "  None Selected"
-            elseif #names == #options then
+            elseif count == #options then
                 selectBtn.Text = "  All Selected (" .. #options .. ")"
-            elseif #names <= 2 then
+            elseif count <= 2 then
                 selectBtn.Text = "  " .. table.concat(names, ", ")
             else
-                selectBtn.Text = "  " .. names[1] .. ", " .. names[2] .. "... (" .. #names .. ")"
+                selectBtn.Text = "  " .. names[1] .. ", " .. names[2] .. "... (" .. count .. ")"
             end
         else
             selectBtn.Text = "  " .. tostring(selectedState)
@@ -1750,12 +1691,83 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
         isOpen = open
         listContainer.Visible = isOpen
         arrow.Text = isOpen and "∧" or "∨"
-        ddFrame.Size = isOpen and UDim2.new(1, 0, 0, 185) or UDim2.new(1, 0, 0, 48)
+        ddFrame.Size = isOpen and UDim2.new(1, 0, 0, 205) or UDim2.new(1, 0, 0, 48)
         if isOpen then
             activeDropdownClose = setDropdownOpen
         elseif activeDropdownClose == setDropdownOpen then
             activeDropdownClose = nil
         end
+    end
+
+    -- Top Action Row for Multi-Select: [ Select All ] [ Deselect All ]
+    if isMulti then
+        local actionRow = Instance.new("Frame")
+        actionRow.Name = "ActionRow"
+        actionRow.Size = UDim2.new(1, 0, 0, 24)
+        actionRow.BackgroundTransparency = 1
+        actionRow.LayoutOrder = 0
+        actionRow.ZIndex = 82
+        actionRow.Parent = listContainer
+
+        local actLayout = Instance.new("UIListLayout")
+        actLayout.FillDirection = Enum.FillDirection.Horizontal
+        actLayout.Padding = UDim.new(0, 4)
+        actLayout.Parent = actionRow
+
+        local selectAllBtn = Instance.new("TextButton")
+        selectAllBtn.Name = "SelectAllBtn"
+        selectAllBtn.Size = UDim2.new(0.5, -2, 1, 0)
+        selectAllBtn.BackgroundColor3 = Color3.fromRGB(32, 38, 55)
+        selectAllBtn.BorderSizePixel = 0
+        selectAllBtn.Font = Enum.Font.GothamMedium
+        selectAllBtn.TextSize = 11
+        selectAllBtn.TextColor3 = Color3.fromRGB(129, 140, 248)
+        selectAllBtn.Text = "✓ Select All"
+        selectAllBtn.ZIndex = 86
+        selectAllBtn.Parent = actionRow
+
+        local selCorner = Instance.new("UICorner")
+        selCorner.CornerRadius = UDim.new(0, 4)
+        selCorner.Parent = selectAllBtn
+
+        local deselectAllBtn = Instance.new("TextButton")
+        deselectAllBtn.Name = "DeselectAllBtn"
+        deselectAllBtn.Size = UDim2.new(0.5, -2, 1, 0)
+        deselectAllBtn.BackgroundColor3 = Color3.fromRGB(38, 30, 36)
+        deselectAllBtn.BorderSizePixel = 0
+        deselectAllBtn.Font = Enum.Font.GothamMedium
+        deselectAllBtn.TextSize = 11
+        deselectAllBtn.TextColor3 = Color3.fromRGB(248, 113, 113)
+        deselectAllBtn.Text = "✕ Deselect All"
+        deselectAllBtn.ZIndex = 86
+        deselectAllBtn.Parent = actionRow
+
+        local deselCorner = Instance.new("UICorner")
+        deselCorner.CornerRadius = UDim.new(0, 4)
+        deselCorner.Parent = deselectAllBtn
+
+        local function refreshMultiButtons()
+            for opt, btn in pairs(optionButtons) do
+                btn.Text = (selectedState[opt] and "  [✓] " or "  [  ] ") .. opt
+                btn.TextColor3 = selectedState[opt] and Color3.fromRGB(129, 140, 248) or Color3.fromRGB(210, 215, 230)
+            end
+            updateButtonText()
+            if callback then callback(selectedState) end
+        end
+
+        selectAllBtn.MouseButton1Click:Connect(function()
+            for _, opt in ipairs(options) do
+                selectedState[opt] = true
+            end
+            refreshMultiButtons()
+        end)
+
+        deselectAllBtn.MouseButton1Click:Connect(function()
+            for _, opt in ipairs(options) do
+                selectedState[opt] = false
+            end
+            refreshMultiButtons()
+        end)
     end
 
     for idx, opt in ipairs(options) do
@@ -1769,13 +1781,14 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
         optBtn.TextXAlignment = Enum.TextXAlignment.Left
         optBtn.ZIndex = 85
         optBtn.TextColor3 = Color3.fromRGB(210, 215, 230)
-        optBtn.LayoutOrder = idx
+        optBtn.LayoutOrder = idx + 1
         
         local optCorner = Instance.new("UICorner")
         optCorner.CornerRadius = UDim.new(0, 4)
         optCorner.Parent = optBtn
 
         if isMulti then
+            optionButtons[opt] = optBtn
             optBtn.Text = (selectedState[opt] and "  [✓] " or "  [  ] ") .. opt
             if selectedState[opt] then
                 optBtn.TextColor3 = Color3.fromRGB(129, 140, 248)
@@ -1930,7 +1943,7 @@ createToggle(TreadmillCard, "Auto Upgrade Treadmill", Config.AutoUpgradeTreadmil
     Config.AutoUpgradeTreadmill = v
 end)
 
--- 3. Egg ESP Card
+-- 3. Egg ESP Card (Infinite Range, No Box, Shows KG)
 local ESPCard = createCard(Col1, "Egg ESP", "◉")
 createToggle(ESPCard, "Egg ESP", Config.EggESP, function(v)
     Config.EggESP = v
@@ -2039,46 +2052,6 @@ createButton(TeleportCard, "Teleport: Safe Zone", function()
 end)
 
 ---------------------------------------------------------------------------
--- POPULATE EXTRA TAB (Combat, Movement & Exploits)
----------------------------------------------------------------------------
-local ExtraLayout = Instance.new("UIListLayout")
-ExtraLayout.Padding = UDim.new(0, 10)
-ExtraLayout.Parent = ExtraTab
-
-local CombatCard = createCard(ExtraTab, "Combat & Survival", "⚔")
-createToggle(CombatCard, "Anti-Ragdoll / Trap Immunity", Config.AntiRagdoll, function(v)
-    Config.AntiRagdoll = v
-end)
-createToggle(CombatCard, "Auto Bat Aura (Anti-Guard)", Config.AutoBatAura, function(v)
-    Config.AutoBatAura = v
-end)
-createToggle(CombatCard, "Invisible / Ghost Mode (FE Replicated)", Config.InvisibleGhost, function(v)
-    Config.InvisibleGhost = v
-    updateFEInvisibility(v)
-end)
-
-local AutomationCard = createCard(ExtraTab, "Extra Automation", "⚙")
-createToggle(AutomationCard, "Auto Claim Free Group Gift", Config.AutoClaimFreeGift, function(v)
-    Config.AutoClaimFreeGift = v
-    if v and FreeGiftClaimRemote then
-        pcall(function() FreeGiftClaimRemote:InvokeServer() end)
-    end
-end)
-
-local MovementCard = createCard(ExtraTab, "Movement & Character", "⚡")
-createToggle(MovementCard, "Noclip Through Walls", Config.Noclip, function(v)
-    Config.Noclip = v
-end)
-createToggle(MovementCard, "Custom WalkSpeed (Fast Run)", Config.CustomSpeedEnabled, function(v)
-    Config.CustomSpeedEnabled = v
-    local hum = getHumanoid()
-    if hum then hum.WalkSpeed = v and Config.WalkSpeedValue or 16 end
-end)
-createToggle(MovementCard, "Infinite Jump", Config.InfiniteJump, function(v)
-    Config.InfiniteJump = v
-end)
-
----------------------------------------------------------------------------
 -- POPULATE SETTINGS TAB (Configuration Presets & General Settings)
 ---------------------------------------------------------------------------
 local SettingsLayout = Instance.new("UIListLayout")
@@ -2132,7 +2105,7 @@ end
 
 local function resetDefaults()
     Config.AutoStealEggs = false
-    Config.SnipeAdminEggs = true
+    Config.SnipeAdminEggs = false
     Config.StealZoneFilters = getDefaultZoneTable()
     Config.StealRarityFilters = getDefaultRarityTable()
     Config.StealPriority = "Nearest"
@@ -2150,9 +2123,6 @@ local function resetDefaults()
     Config.EggESP = false
     Config.ESPRarityFilters = getDefaultRarityTable()
     Config.AntiRagdoll = true
-    Config.AutoBatAura = false
-    Config.InvisibleGhost = false
-    updateFEInvisibility(false)
     Config.SafeTravelMode = false
     setStatus("Settings reset to defaults.")
 end
@@ -2174,7 +2144,6 @@ end)
 createButton(GeneralSettings, "Unload Script & Destroy GUI", function()
     Config.EggESP = false
     for obj in pairs(ActiveESPs) do clearESP(obj) end
-    if isInvisibleActive then updateFEInvisibility(false) end
     ScreenGui:Destroy()
 end)
 
@@ -2195,7 +2164,7 @@ print([[
     ╔═══════════════════════════════════════════════════════════╗
     ║       ALEXANDRIA MAIN — STEAL KPOP EGGS LOADED!           ║
     ║       UI Hotkey: RightShift                               ║
-    ║       Version: 3.2.0 (Enhanced Edition)                   ║
+    ║       Version: 3.3.0 (Streamlined & Rapid)                ║
     ╚═══════════════════════════════════════════════════════════╝
 ]])
 
