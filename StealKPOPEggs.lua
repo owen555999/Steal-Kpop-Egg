@@ -125,7 +125,9 @@ local RARITIES = {
     "Cosmic",
     "Secret",
     "Eternal",
-    "Divine"
+    "Divine",
+    "Exclusive",
+    "Admin"
 }
 
 local RARITY_TIERS = {
@@ -138,7 +140,9 @@ local RARITY_TIERS = {
     ["Cosmic"]     = 7,
     ["Secret"]     = 8,
     ["Eternal"]    = 9,
-    ["Divine"]     = 10
+    ["Divine"]     = 10,
+    ["Exclusive"]  = 11,
+    ["Admin"]      = 12
 }
 
 local RARITY_COLORS = {
@@ -151,7 +155,9 @@ local RARITY_COLORS = {
     ["Cosmic"]     = Color3.fromRGB(255, 95, 225),
     ["Secret"]     = Color3.fromRGB(80, 255, 195),
     ["Eternal"]    = Color3.fromRGB(0, 220, 255),
-    ["Divine"]     = Color3.fromRGB(255, 245, 165)
+    ["Divine"]     = Color3.fromRGB(255, 245, 165),
+    ["Exclusive"]  = Color3.fromRGB(255, 120, 240),
+    ["Admin"]      = Color3.fromRGB(255, 45, 85)
 }
 
 local TRAIL_LIST = {
@@ -171,14 +177,15 @@ local TRAIL_LIST = {
 local Config = {
     -- Auto Steal Eggs
     AutoStealEggs       = false,
+    SnipeAdminEggs      = false, -- Dedicated Admin & Exclusive Egg Global Sniper
     StealZoneFilters    = { ["CELESTIAL"] = true, ["COSMIC"] = true },
-    StealRarityFilters  = { ["Common"] = true, ["Uncommon"] = true, ["Rare"] = true, ["Epic"] = true, ["Legendary"] = true, ["Mythic"] = true, ["Cosmic"] = true, ["Secret"] = true, ["Eternal"] = true, ["Divine"] = true },
-    StealPriority       = "Nearest", -- "Nearest", "Highest Rarity", "Lowest Rarity"
+    StealRarityFilters  = { ["Common"] = true, ["Uncommon"] = true, ["Rare"] = true, ["Epic"] = true, ["Legendary"] = true, ["Mythic"] = true, ["Cosmic"] = true, ["Secret"] = true, ["Eternal"] = true, ["Divine"] = true, ["Exclusive"] = true, ["Admin"] = true },
+    StealPriority       = "Nearest", -- "Nearest", "Biggest", "Random"
     StealStatus         = "Idle",
 
     -- Eggs (Plot)
     AutoPlaceEggs       = false,
-    PlaceRarityFilters  = { ["Common"] = true, ["Uncommon"] = true, ["Rare"] = true, ["Epic"] = true, ["Legendary"] = true, ["Mythic"] = true, ["Cosmic"] = true, ["Secret"] = true, ["Eternal"] = true, ["Divine"] = true },
+    PlaceRarityFilters  = { ["Common"] = true, ["Uncommon"] = true, ["Rare"] = true, ["Epic"] = true, ["Legendary"] = true, ["Mythic"] = true, ["Cosmic"] = true, ["Secret"] = true, ["Eternal"] = true, ["Divine"] = true, ["Exclusive"] = true, ["Admin"] = true },
     AutoHatch           = false,
     AutoEquipBest       = false,
 
@@ -195,7 +202,7 @@ local Config = {
 
     -- Egg ESP
     EggESP              = false,
-    ESPRarityFilters    = { ["Common"] = true, ["Uncommon"] = true, ["Rare"] = true, ["Epic"] = true, ["Legendary"] = true, ["Mythic"] = true, ["Cosmic"] = true, ["Secret"] = true, ["Eternal"] = true, ["Divine"] = true },
+    ESPRarityFilters    = { ["Common"] = true, ["Uncommon"] = true, ["Rare"] = true, ["Epic"] = true, ["Legendary"] = true, ["Mythic"] = true, ["Cosmic"] = true, ["Secret"] = true, ["Eternal"] = true, ["Divine"] = true, ["Exclusive"] = true, ["Admin"] = true },
 
     -- Extra Systems
     AutoClaimFreeGift   = false,
@@ -211,6 +218,11 @@ local Config = {
     Noclip              = false,
     FlyEnabled          = false,
     AntiAFK             = true,
+
+    -- Anti-Detect & Stealth Settings
+    SafeTravelMode      = true, -- Smooth tween movement instead of instant CFrame to bypass server speed checks
+    TweenSpeed          = 65,   -- Studs per second (natural speed matching in-game speed buffs)
+    HumanizeDelays      = true, -- Add randomized jitter to remote calls to mimic human input
 
     -- Teleport Target Zone
     SelectedTeleportZone = "FOREST"
@@ -291,7 +303,36 @@ local function getEggZone(egg)
     return "UNKNOWN"
 end
 
+local function getEggSize(eggObj)
+    if not eggObj then return 1 end
+    local kg = eggObj:GetAttribute("AlbumWeightKg")
+    if type(kg) == "number" then return kg end
+    local sz = eggObj:GetAttribute("AlbumSize")
+    if type(sz) == "number" then return sz end
+    if eggObj:IsA("Model") then
+        local cf, size = eggObj:GetBoundingBox()
+        return size.X * size.Y * size.Z
+    end
+    return 1
+end
+
 local function getEggRarity(egg)
+    -- Check Admin egg
+    if egg:GetAttribute("AdminHuntEgg") == true 
+       or (egg.Parent and egg.Parent.Name == "AdminEggHuntDrops") 
+       or egg.Name == "AdminEgg" 
+       or (egg:GetAttribute("SetId") and tostring(egg:GetAttribute("SetId")):lower():find("admin")) then
+        return "Admin"
+    end
+    
+    -- Check Exclusive egg
+    if egg:GetAttribute("ExclusiveSetId") ~= nil 
+       or (egg.Parent and egg.Parent.Name == "ExclusivePlacedEggs") 
+       or (egg:GetAttribute("SetId") and tostring(egg:GetAttribute("SetId")):lower():find("exclusive"))
+       or egg.Name:find("Exclusive") then
+        return "Exclusive"
+    end
+
     local r = egg:GetAttribute("RarityAura") or egg:GetAttribute("AlbumRarity") or egg:GetAttribute("Rarity")
     if r and RARITY_TIERS[r] then return r end
     
@@ -300,12 +341,64 @@ local function getEggRarity(egg)
     if label and label:IsA("BillboardGui") then
         local text = label:FindFirstChildWhichIsA("TextLabel", true)
         if text then
+            if text.Text:find("ADMIN") then return "Admin" end
             for rarityName in pairs(RARITY_TIERS) do
                 if text.Text:find(rarityName) then return rarityName end
             end
         end
     end
     return "Common"
+end
+
+local function getAdminAndExclusiveEggs()
+    local results = {}
+    local seen = {}
+
+    local function addTarget(obj, isAdm)
+        if not obj or seen[obj] then return end
+        if obj:GetAttribute("OwnerUserId") == LocalPlayer.UserId then return end
+        seen[obj] = true
+
+        local pivot = (obj:IsA("Model") and obj:GetPivot()) 
+            or (obj:FindFirstChild("Handle") and obj.Handle.CFrame) 
+            or (obj:GetAttribute("Ground") and CFrame.new(obj:GetAttribute("Ground"))) 
+            or (obj:IsA("BasePart") and obj.CFrame)
+            or (obj:FindFirstChildWhichIsA("BasePart") and obj:FindFirstChildWhichIsA("BasePart").CFrame)
+            
+        if not pivot then return end
+        local rName = isAdm and "Admin" or "Exclusive"
+        table.insert(results, {
+            Object = obj,
+            Position = pivot.Position,
+            Zone = "GLOBAL",
+            Rarity = rName,
+            Tier = RARITY_TIERS[rName] or 12,
+            Name = isAdm and "Admin Egg" or "Exclusive Egg"
+        })
+    end
+
+    -- 1. Scan workspace.AdminEggHuntDrops
+    local drops = workspace:FindFirstChild("AdminEggHuntDrops")
+    if drops then
+        for _, drop in ipairs(drops:GetChildren()) do
+            addTarget(drop, true)
+        end
+    end
+
+    -- 2. Scan whole workspace for Admin / Exclusive drops
+    for _, desc in ipairs(workspace:GetDescendants()) do
+        if desc:IsA("Model") or desc:IsA("Tool") then
+            if desc:GetAttribute("AdminHuntEgg") == true or desc.Name == "AdminEgg" then
+                addTarget(desc, true)
+            elseif desc:GetAttribute("SetId") and tostring(desc:GetAttribute("SetId")):lower():find("admin") then
+                addTarget(desc, true)
+            elseif desc:GetAttribute("ExclusiveSetId") ~= nil or (desc:GetAttribute("SetId") and tostring(desc:GetAttribute("SetId")):lower():find("exclusive")) then
+                addTarget(desc, false)
+            end
+        end
+    end
+
+    return results
 end
 
 local function isEggObject(obj)
@@ -383,14 +476,33 @@ local function getAllEligibleEggs()
     return results
 end
 
-local function teleportTo(cframeOrPos)
+local function safeWait(baseSec)
+    local jitter = Config.HumanizeDelays and (math.random() * 0.12) or 0
+    task.wait((baseSec or 0.2) + jitter)
+end
+
+local function teleportTo(cframeOrPos, forceInstant)
     local root = getRootPart()
     if not root then return end
-    if typeof(cframeOrPos) == "Vector3" then
-        root.CFrame = CFrame.new(cframeOrPos)
-    elseif typeof(cframeOrPos) == "CFrame" then
-        root.CFrame = cframeOrPos
+    local targetCF = typeof(cframeOrPos) == "CFrame" and cframeOrPos or CFrame.new(cframeOrPos)
+
+    if forceInstant or not Config.SafeTravelMode then
+        root.CFrame = targetCF
+        return
     end
+
+    -- Safe Mode: Smooth Tween with Collision disabled to pass server checks cleanly
+    local dist = (root.Position - targetCF.Position).Magnitude
+    if dist <= 8 then
+        root.CFrame = targetCF
+        return
+    end
+
+    local speed = Config.TweenSpeed or 65
+    local duration = math.clamp(dist / speed, 0.2, 5.0)
+    local tween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = targetCF })
+    tween:Play()
+    tween.Completed:Wait()
 end
 
 ---------------------------------------------------------------------------
@@ -437,36 +549,49 @@ task.spawn(function()
                     task.wait(1)
                 end
             else
-                -- Find eggs to steal
-                setStatus("Scanning for matching eggs...")
-                local eggs = getAllEligibleEggs()
+                local eggs = {}
+
+                -- Priority Check: Dedicated Admin & Exclusive Global Sniper
+                if Config.SnipeAdminEggs then
+                    local adminEggs = getAdminAndExclusiveEggs()
+                    if #adminEggs > 0 then
+                        eggs = adminEggs
+                        setStatus("⚡ Admin Egg detected! Sniping...")
+                    end
+                end
+
+                -- If no admin eggs found, scan standard matching eggs
                 if #eggs == 0 then
-                    setStatus("No matching eggs in zones. Waiting...")
+                    setStatus("Scanning for matching eggs...")
+                    eggs = getAllEligibleEggs()
+                end
+
+                if #eggs == 0 then
+                    setStatus("No matching eggs found. Waiting...")
                     task.wait(1.5)
                 else
-                    -- Sort eggs by Priority
                     local myPos = root.Position
-                    if Config.StealPriority == "Highest Rarity" then
+                    local target = nil
+
+                    -- Sort eggs by Priority: Nearest, Biggest, Random
+                    if Config.StealPriority == "Biggest" then
                         table.sort(eggs, function(a, b)
-                            if a.Tier == b.Tier then
+                            local szA = getEggSize(a.Object)
+                            local szB = getEggSize(b.Object)
+                            if szA == szB then
                                 return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
                             end
-                            return a.Tier > b.Tier
+                            return szA > szB
                         end)
-                    elseif Config.StealPriority == "Lowest Rarity" then
-                        table.sort(eggs, function(a, b)
-                            if a.Tier == b.Tier then
-                                return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
-                            end
-                            return a.Tier < b.Tier
-                        end)
+                        target = eggs[1]
+                    elseif Config.StealPriority == "Random" then
+                        target = eggs[math.random(1, #eggs)]
                     else -- "Nearest"
                         table.sort(eggs, function(a, b)
                             return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
                         end)
+                        target = eggs[1]
                     end
-
-                    local target = eggs[1]
                     if target and target.Object and target.Object.Parent then
                         setStatus("Stealing " .. tostring(target.Name) .. " (" .. target.Rarity .. ")...")
                         
@@ -1091,6 +1216,78 @@ HeaderTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
 HeaderTitle.Text = "◈  Alexandria Main"
 HeaderTitle.Parent = Header
 
+-- Floating Circular Minimize Icon Button (Matches user request)
+local FloatingIcon = Instance.new("ImageButton")
+FloatingIcon.Name = "Alexandria_FloatingIcon"
+FloatingIcon.Size = UDim2.fromOffset(50, 50)
+FloatingIcon.Position = UDim2.new(0.5, -25, 0, 16)
+FloatingIcon.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
+FloatingIcon.BorderSizePixel = 0
+FloatingIcon.Visible = false
+FloatingIcon.Active = true
+FloatingIcon.Parent = ScreenGui
+
+local FloatCorner = Instance.new("UICorner")
+FloatCorner.CornerRadius = UDim.new(1, 0)
+FloatCorner.Parent = FloatingIcon
+
+local FloatStroke = Instance.new("UIStroke")
+FloatStroke.Color = Color3.fromRGB(99, 102, 241)
+FloatStroke.Thickness = 2
+FloatStroke.Parent = FloatingIcon
+
+local FloatGrad = Instance.new("UIGradient")
+FloatGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(35, 38, 55)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(16, 18, 26))
+})
+FloatGrad.Rotation = 45
+FloatGrad.Parent = FloatingIcon
+
+local FloatIconLabel = Instance.new("TextLabel")
+FloatIconLabel.Size = UDim2.fromScale(1, 1)
+FloatIconLabel.BackgroundTransparency = 1
+FloatIconLabel.Font = Enum.Font.GothamBold
+FloatIconLabel.TextSize = 22
+FloatIconLabel.TextColor3 = Color3.fromRGB(240, 245, 255)
+FloatIconLabel.Text = "◈"
+FloatIconLabel.Parent = FloatingIcon
+
+-- Draggable functionality for Floating Icon
+local fDragging, fDragInput, fDragStart, fStartPos
+FloatingIcon.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        fDragging = true
+        fDragStart = input.Position
+        fStartPos = FloatingIcon.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                fDragging = false
+            end
+        end)
+    end
+end)
+
+FloatingIcon.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        fDragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == fDragInput and fDragging then
+        local delta = input.Position - fDragStart
+        FloatingIcon.Position = UDim2.new(fStartPos.X.Scale, fStartPos.X.Offset + delta.X, fStartPos.Y.Scale, fStartPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- Click Floating Icon to restore MainFrame
+FloatingIcon.MouseButton1Click:Connect(function()
+    FloatingIcon.Visible = false
+    MainFrame.Visible = true
+    MainFrame.Size = UDim2.fromOffset(780, 500)
+end)
+
 local MinimizeBtn = Instance.new("TextButton")
 MinimizeBtn.Size = UDim2.fromOffset(28, 28)
 MinimizeBtn.Position = UDim2.new(1, -38, 0, 7)
@@ -1101,11 +1298,9 @@ MinimizeBtn.TextColor3 = Color3.fromRGB(150, 155, 175)
 MinimizeBtn.Text = "—"
 MinimizeBtn.Parent = Header
 
-local isMinimized = false
 MinimizeBtn.MouseButton1Click:Connect(function()
-    isMinimized = not isMinimized
-    local targetSize = isMinimized and UDim2.fromOffset(780, 42) or UDim2.fromOffset(780, 500)
-    TweenService:Create(MainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), { Size = targetSize }):Play()
+    MainFrame.Visible = false
+    FloatingIcon.Visible = true
 end)
 
 -- Sidebar (Left)
@@ -1361,11 +1556,14 @@ local function createToggle(parent, text, defaultVal, callback)
     return toggleFrame
 end
 
+local activeDropdownClose = nil
+
 local function createDropdown(parent, labelText, options, defaultSelected, isMulti, callback)
+    local isOpen = false
     local ddFrame = Instance.new("Frame")
     ddFrame.Size = UDim2.new(1, 0, 0, 48)
-    ddFrame.AutomaticSize = Enum.AutomaticSize.None
     ddFrame.BackgroundTransparency = 1
+    ddFrame.ClipsDescendants = false
     ddFrame.Parent = parent
 
     local title = Instance.new("TextLabel")
@@ -1408,30 +1606,46 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
     arrow.Text = "∨"
     arrow.Parent = selectBtn
 
-    -- Option List Container
+    -- Option List Container (Scrollable)
     local listContainer = Instance.new("ScrollingFrame")
     listContainer.Name = "DropdownList"
-    listContainer.Size = UDim2.new(1, 0, 0, 120)
-    listContainer.Position = UDim2.fromOffset(0, 48)
-    listContainer.BackgroundColor3 = Color3.fromRGB(18, 20, 26)
+    listContainer.Size = UDim2.new(1, 0, 0, 130)
+    listContainer.Position = UDim2.fromOffset(0, 50)
+    listContainer.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
+    listContainer.BackgroundTransparency = 0
     listContainer.BorderSizePixel = 0
-    listContainer.ScrollBarThickness = 3
-    listContainer.ZIndex = 50
+    listContainer.ScrollBarThickness = 5
+    listContainer.ScrollBarImageColor3 = Color3.fromRGB(99, 102, 241)
+    listContainer.ScrollBarImageTransparency = 0.2
+    listContainer.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    listContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+    listContainer.ScrollingDirection = Enum.ScrollingDirection.Y
+    listContainer.ClipsDescendants = true
+    listContainer.Active = true
+    listContainer.ZIndex = 80
     listContainer.Visible = false
     listContainer.Parent = ddFrame
 
     local listCorner = Instance.new("UICorner")
-    listCorner.CornerRadius = UDim.new(0, 5)
+    listCorner.CornerRadius = UDim.new(0, 6)
     listCorner.Parent = listContainer
 
     local listStroke = Instance.new("UIStroke")
-    listStroke.Color = Color3.fromRGB(45, 49, 66)
+    listStroke.Color = Color3.fromRGB(48, 52, 70)
     listStroke.Thickness = 1
     listStroke.Parent = listContainer
 
     local listLayout = Instance.new("UIListLayout")
     listLayout.Padding = UDim.new(0, 2)
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
     listLayout.Parent = listContainer
+
+    local listPad = Instance.new("UIPadding")
+    listPad.PaddingTop = UDim.new(0, 4)
+    listPad.PaddingBottom = UDim.new(0, 4)
+    listPad.PaddingLeft = UDim.new(0, 4)
+    listPad.PaddingRight = UDim.new(0, 6)
+    listPad.Parent = listContainer
 
     local selectedState = isMulti and (defaultSelected or {}) or (defaultSelected or options[1])
 
@@ -1454,21 +1668,49 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
     end
     updateButtonText()
 
-    for _, opt in ipairs(options) do
+    local function setDropdownOpen(open)
+        if open and activeDropdownClose and activeDropdownClose ~= setDropdownOpen then
+            activeDropdownClose(false)
+        end
+        isOpen = open
+        listContainer.Visible = isOpen
+        arrow.Text = isOpen and "∧" or "∨"
+        ddFrame.Size = isOpen and UDim2.new(1, 0, 0, 185) or UDim2.new(1, 0, 0, 48)
+        if isOpen then
+            activeDropdownClose = setDropdownOpen
+        elseif activeDropdownClose == setDropdownOpen then
+            activeDropdownClose = nil
+        end
+    end
+
+    for idx, opt in ipairs(options) do
         local optBtn = Instance.new("TextButton")
-        optBtn.Size = UDim2.new(1, 0, 0, 24)
-        optBtn.BackgroundColor3 = Color3.fromRGB(24, 26, 35)
-        optBtn.BackgroundTransparency = 0.5
+        optBtn.Size = UDim2.new(1, 0, 0, 26)
+        optBtn.BackgroundColor3 = Color3.fromRGB(24, 26, 36)
+        optBtn.BackgroundTransparency = 0
+        optBtn.BorderSizePixel = 0
         optBtn.Font = Enum.Font.Gotham
         optBtn.TextSize = 12
         optBtn.TextXAlignment = Enum.TextXAlignment.Left
-        optBtn.ZIndex = 51
-        optBtn.TextColor3 = Color3.fromRGB(200, 205, 220)
+        optBtn.ZIndex = 85
+        optBtn.TextColor3 = Color3.fromRGB(210, 215, 230)
+        optBtn.LayoutOrder = idx
         
+        local optCorner = Instance.new("UICorner")
+        optCorner.CornerRadius = UDim.new(0, 4)
+        optCorner.Parent = optBtn
+
         if isMulti then
             optBtn.Text = (selectedState[opt] and "  [✓] " or "  [  ] ") .. opt
+            if selectedState[opt] then
+                optBtn.TextColor3 = Color3.fromRGB(129, 140, 248)
+            end
         else
             optBtn.Text = "  " .. opt
+            if selectedState == opt then
+                optBtn.TextColor3 = Color3.fromRGB(129, 140, 248)
+                optBtn.BackgroundColor3 = Color3.fromRGB(32, 35, 48)
+            end
         end
         optBtn.Parent = listContainer
 
@@ -1476,21 +1718,20 @@ local function createDropdown(parent, labelText, options, defaultSelected, isMul
             if isMulti then
                 selectedState[opt] = not selectedState[opt]
                 optBtn.Text = (selectedState[opt] and "  [✓] " or "  [  ] ") .. opt
+                optBtn.TextColor3 = selectedState[opt] and Color3.fromRGB(129, 140, 248) or Color3.fromRGB(210, 215, 230)
                 updateButtonText()
                 if callback then callback(selectedState) end
             else
                 selectedState = opt
                 updateButtonText()
-                listContainer.Visible = false
-                arrow.Text = "∨"
+                setDropdownOpen(false)
                 if callback then callback(selectedState) end
             end
         end)
     end
 
     selectBtn.MouseButton1Click:Connect(function()
-        listContainer.Visible = not listContainer.Visible
-        arrow.Text = listContainer.Visible and "∧" or "∨"
+        setDropdownOpen(not isOpen)
     end)
 
     return ddFrame
@@ -1564,13 +1805,16 @@ local StealCard = createCard(Col1, "Auto Steal Eggs", "◎")
 createToggle(StealCard, "Auto Steal Eggs", Config.AutoStealEggs, function(v)
     Config.AutoStealEggs = v
 end)
+createToggle(StealCard, "⚡ Auto Snipe Admin & Exclusive (Global)", Config.SnipeAdminEggs, function(v)
+    Config.SnipeAdminEggs = v
+end)
 createDropdown(StealCard, "Zone Filter", ZONES, Config.StealZoneFilters, true, function(selected)
     Config.StealZoneFilters = selected
 end)
 createDropdown(StealCard, "Rarity Filter", RARITIES, Config.StealRarityFilters, true, function(selected)
     Config.StealRarityFilters = selected
 end)
-createDropdown(StealCard, "Priority", { "Nearest", "Highest Rarity", "Lowest Rarity" }, Config.StealPriority, false, function(selected)
+createDropdown(StealCard, "Priority", { "Nearest", "Biggest", "Random" }, Config.StealPriority, false, function(selected)
     Config.StealPriority = selected
 end)
 
@@ -1784,6 +2028,12 @@ SettingsLayout.Padding = UDim.new(0, 10)
 SettingsLayout.Parent = SettingsTab
 
 local GeneralSettings = createCard(SettingsTab, "General Settings", "⚙")
+createToggle(GeneralSettings, "Safe Travel Mode (Anti-Detect Tween)", Config.SafeTravelMode, function(v)
+    Config.SafeTravelMode = v
+end)
+createToggle(GeneralSettings, "Humanized Delay Jitter (Anti-Spam)", Config.HumanizeDelays, function(v)
+    Config.HumanizeDelays = v
+end)
 createButton(GeneralSettings, "Toggle UI Visibility (or Press RightShift)", function()
     MainFrame.Visible = not MainFrame.Visible
 end)
@@ -1798,7 +2048,14 @@ end)
 -- Keybind to toggle UI (RightShift)
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
-        MainFrame.Visible = not MainFrame.Visible
+        if MainFrame.Visible then
+            MainFrame.Visible = false
+            FloatingIcon.Visible = true
+        else
+            FloatingIcon.Visible = false
+            MainFrame.Visible = true
+            MainFrame.Size = UDim2.fromOffset(780, 500)
+        end
     end
 end)
 
