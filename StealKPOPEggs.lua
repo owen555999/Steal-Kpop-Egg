@@ -37,9 +37,11 @@ local function safeFireProximityPrompt(prompt)
     if not prompt or not prompt.Parent then return false end
     local oldDist = prompt.MaxActivationDistance
     local oldLOS  = prompt.RequiresLineOfSight
+    local oldHold = prompt.HoldDuration
     pcall(function()
         prompt.MaxActivationDistance = math.huge
         prompt.RequiresLineOfSight   = false
+        prompt.HoldDuration          = 0
     end)
     
     local fired = false
@@ -50,18 +52,22 @@ local function safeFireProximityPrompt(prompt)
         end)
     end
     
-    if not fired and prompt.InputHoldBegin and prompt.InputHoldEnd then
-        pcall(function()
+    pcall(function()
+        if prompt.InputHoldBegin and prompt.InputHoldEnd then
             prompt:InputHoldBegin()
-            task.wait(prompt.HoldDuration or 0.1)
             prompt:InputHoldEnd()
             fired = true
-        end)
-    end
+        end
+    end)
     
-    pcall(function()
-        prompt.MaxActivationDistance = oldDist
-        prompt.RequiresLineOfSight   = oldLOS
+    task.delay(0.5, function()
+        pcall(function()
+            if prompt and prompt.Parent then
+                prompt.MaxActivationDistance = oldDist
+                prompt.RequiresLineOfSight   = oldLOS
+                prompt.HoldDuration          = oldHold
+            end
+        end)
     end)
     return fired
 end
@@ -349,6 +355,27 @@ local function isCarryingEgg()
     return false
 end
 
+local function neutralizeNearbyGuards(targetPos, radius)
+    radius = radius or 45
+    pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                local pName = obj.Name
+                local mName = obj.Parent and obj.Parent.Name or ""
+                if pName == "GuardRoot" or pName == "RigRoot" or pName:find("Guard") or mName:find("Guard") 
+                   or mName == "Chicken" or mName == "Swan" or mName == "Scorpion" or mName == "Tiger" 
+                   or mName == "Yeti" or mName == "Hellhound" or mName == "Moby" or mName == "T-Rex" 
+                   or mName == "Dragon" or mName:find("fox") or mName:find("Gorilla") or mName:find("Angel") then
+                    if (obj.Position - targetPos).Magnitude <= radius then
+                        obj.CanTouch = false
+                        obj.CanCollide = false
+                    end
+                end
+            end
+        end
+    end)
+end
+
 local function getEggZone(egg)
     local zoneAttr = egg:GetAttribute("AlbumZone") or egg:GetAttribute("Zone") or egg:GetAttribute("ZoneName")
     if zoneAttr then return string.upper(tostring(zoneAttr)) end
@@ -610,12 +637,12 @@ end
 -- CORE ENGINE SERVICES
 ---------------------------------------------------------------------------
 
--- 1. AUTO STEAL EGGS SERVICE (Fast Chaining + Hold Confirmation)
+-- 1. AUTO STEAL EGGS SERVICE (Ultra-Fast Snatch & Anti-Guardian Return)
 local isStealingActive = false
 
 task.spawn(function()
     while true do
-        task.wait(0.05)
+        task.wait(0.04)
         if Config.AutoStealEggs and not isStealingActive then
             local root = getRootPart()
             if not root then
@@ -623,18 +650,7 @@ task.spawn(function()
                 continue
             end
 
-            -- If player started toggle while already holding an egg, deposit it at plot first
-            if isCarryingEgg() then
-                local _, plotCF = getPlotFloorPosition()
-                if plotCF then
-                    root.CFrame = plotCF + Vector3.new(0, 3, 0)
-                    task.wait(0.06)
-                    if DropAlbumRemote then
-                        pcall(function() DropAlbumRemote:FireServer() end)
-                    end
-                end
-                task.wait(0.1)
-            end
+            -- NOTE: Do NOT drop eggs at base! Player keeps holding eggs or safe zone scores automatically.
 
             local eggs = {}
 
@@ -653,7 +669,7 @@ task.spawn(function()
 
             if #eggs == 0 then
                 setStatus("Searching for eggs...")
-                task.wait(0.4)
+                task.wait(0.3)
             else
                 local myPos = root.Position
                 local target = nil
@@ -680,11 +696,17 @@ task.spawn(function()
                 if target and target.Object and target.Object.Parent then
                     isStealingActive = true
                     local targetLabel = tostring(target.Name) .. " (" .. target.Rarity .. (target.WeightFormatted and (" • " .. target.WeightFormatted) or "") .. ")"
-                    setStatus("Warping to " .. targetLabel .. "...")
-                    
-                    -- 1. Direct instant CFrame warp to egg
-                    root.CFrame = target.CFrame + Vector3.new(0, 2, 0)
-                    task.wait(0.08)
+                    setStatus("Snatching " .. targetLabel .. "...")
+
+                    -- Pre-calculate return Plot CFrame BEFORE warp so zero time is wasted
+                    local _, plotCF = getPlotFloorPosition()
+                    local returnCF = plotCF and (plotCF + Vector3.new(0, 3, 0)) or (root.CFrame)
+
+                    -- Neutralize nearby guardian collision and touch detection
+                    neutralizeNearbyGuards(target.Position, 45)
+
+                    -- 1. Instant warp elevated slightly above ground guardian melee reach (HitDistance is 2.5 - 5 studs)
+                    root.CFrame = target.CFrame + Vector3.new(0, 3.8, 0)
 
                     -- 2. Find ProximityPrompt inside egg or touch fallback
                     local prompt = target.Object:FindFirstChildWhichIsA("ProximityPrompt", true)
@@ -695,46 +717,45 @@ task.spawn(function()
                         end
                     end
 
+                    -- 3. Fire prompt interaction instantly (zero hold duration)
                     if prompt then
                         safeFireProximityPrompt(prompt)
                     else
                         local part = target.Object:FindFirstChildWhichIsA("BasePart", true)
                         if part and root and firetouchinterest then
-                            firetouchinterest(root, part, 0)
-                            task.wait(0.04)
-                            firetouchinterest(root, part, 1)
+                            pcall(function()
+                                firetouchinterest(root, part, 0)
+                                task.wait(0.01)
+                                firetouchinterest(root, part, 1)
+                            end)
                         end
                     end
 
-                    -- 3. HOLD CONFIRMATION: Ensure egg is actually picked up before warping back
-                    local gotEgg = false
-                    for _ = 1, 15 do
+                    -- 4. Micro-poll (checks every 0.01s up to max 0.06s)
+                    -- The instant egg is held, break immediately so player is gone before the guard can wake up (GuardWakeSeconds = 0.63s)
+                    for _ = 1, 6 do
                         if isCarryingEgg() then
-                            gotEgg = true
                             break
                         end
                         if prompt and not prompt.RequiresLineOfSight then
                             safeFireProximityPrompt(prompt)
                         end
-                        task.wait(0.08)
+                        task.wait(0.01)
                     end
 
-                    -- 4. Warp back to owned plot floor once confirmed
-                    local _, plotCF = getPlotFloorPosition()
-                    if plotCF then
-                        root.CFrame = plotCF + Vector3.new(0, 3, 0)
-                        task.wait(0.06)
+                    -- 5. INSTANT SNAP BACK TO PLOT FLOOR
+                    root.CFrame = returnCF
 
-                        -- Immediately drop/secure album at base
-                        if DropAlbumRemote then
-                            pcall(function() DropAlbumRemote:FireServer() end)
-                        end
+                    -- 6. Yield 0.04s at base for server safe-zone verification (GuardEscapedAt / Egg secured)
+                    task.wait(0.04)
 
-                        setStatus("Returned to Plot! Warping to next egg...")
-                    end
+                    -- NOTE: As requested by user:
+                    -- DO NOT drop egg at base (never call DropAlbumRemote)
+                    -- DO NOT check if player is holding egg or wait for hand to clear
+                    -- Immediately proceed to snatch next egg!
+                    setStatus("Secured at Plot! Warping to next egg...")
 
-                    -- 5. Rapid chaining: immediately ready to steal next egg
-                    task.wait(0.06)
+                    task.wait(0.02)
                     isStealingActive = false
                 end
             end
