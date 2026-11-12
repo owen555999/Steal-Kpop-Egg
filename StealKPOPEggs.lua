@@ -477,7 +477,7 @@ local function getAllEggs()
     local results = {}
     local seen = {}
     local char = LocalPlayer.Character
-    local myPlot = getMyPlot()
+    local myPlot = getPlayerPlot()
 
     local function addTarget(item, zoneOverride, rarityOverride)
         if not item or seen[item] then return end
@@ -490,18 +490,6 @@ local function getAllEggs()
         if myPlot and item:IsDescendantOf(myPlot) then return end
         if item:GetAttribute("OwnerUserId") == LocalPlayer.UserId then return end
         if item:GetAttribute("PersonalOwnerUserId") == LocalPlayer.UserId then return end
-
-        -- Blacklist filter: Ignore recently stolen eggs
-        if stolenBlacklist[item] and os.clock() < stolenBlacklist[item] then return end
-
-        -- Check if egg has a prompt and whether it's enabled
-        local prompt = item:FindFirstChildWhichIsA("ProximityPrompt", true)
-        if not prompt and item:FindFirstChild("CasePart") then
-            prompt = item.CasePart:FindFirstChildWhichIsA("ProximityPrompt", true)
-        end
-        if prompt and not prompt.Enabled then
-            return -- egg is already taken or respawning
-        end
 
         local pivot = (item:IsA("Model") and item:GetPivot())
             or (item:FindFirstChild("CasePart") and item.CasePart.CFrame)
@@ -592,8 +580,10 @@ local function getAdminAndExclusiveEggs()
     local all = getAllEggs()
     local adminEggs = {}
     for _, egg in ipairs(all) do
-        if egg.Rarity == "Admin" or egg.Rarity == "Exclusive" or egg.Zone == "GLOBAL" then
-            table.insert(adminEggs, egg)
+        if not (stolenBlacklist[egg.Object] and os.clock() < stolenBlacklist[egg.Object]) then
+            if egg.Rarity == "Admin" or egg.Rarity == "Exclusive" or egg.Zone == "GLOBAL" then
+                table.insert(adminEggs, egg)
+            end
         end
     end
     return adminEggs
@@ -604,6 +594,10 @@ local function getAllEligibleEggs()
     local filtered = {}
 
     for _, egg in ipairs(all) do
+        if stolenBlacklist[egg.Object] and os.clock() < stolenBlacklist[egg.Object] then
+            continue
+        end
+
         local zonePass = false
         if next(Config.StealZoneFilters) == nil then
             zonePass = true
@@ -767,24 +761,24 @@ task.spawn(function()
                         end
                     end
 
-                    -- 4. Micro-poll confirmation: Check if grabbed (held in hand, prompt disabled, or egg moved)
-                    -- Polls every 0.02s up to max 0.2s. The instant grabbed, snaps to base IMMEDIATELY!
-                    for _ = 1, 10 do
-                        local grabbed = isCarryingEgg() 
-                            or (prompt and (not prompt.Parent or not prompt.Enabled)) 
-                            or (not target.Object.Parent or not target.Object:IsDescendantOf(workspace))
-                        if grabbed then
+                    -- 4. Fast grab dispatch & confirmation (yields ~0.1s for server network dispatch)
+                    local startHeld = isCarryingEgg()
+                    for _ = 1, 6 do
+                        task.wait(0.02)
+                        if not startHeld and isCarryingEgg() then
                             break
                         end
-                        task.wait(0.02)
+                        if not target.Object.Parent or not target.Object:IsDescendantOf(workspace) then
+                            break
+                        end
                     end
 
                     -- 5. INSTANT SNAP BACK TO PLOT FLOOR
                     root.CFrame = returnCF
                     root.AssemblyLinearVelocity = Vector3.zero
 
-                    -- Blacklist target object so it is NEVER re-selected immediately
-                    stolenBlacklist[target.Object] = os.clock() + 30
+                    -- Blacklist target object so it is not re-selected immediately
+                    stolenBlacklist[target.Object] = os.clock() + 15
 
                     -- 6. Yield 0.04s at base for server safe-zone verification (GuardEscapedAt / Egg secured)
                     task.wait(0.04)
