@@ -1,7 +1,8 @@
 --[[
     ═══════════════════════════════════════════════════════════════════════════
        ALEXANDRIA MAIN — STEAL KPOP EGGS ULTIMATE AUTOMATION SUITE
-       Version: 3.3.0 (Streamlined & Rapid Edition)
+       Version: 3.4.0 (Stability & Performance Update)
+       Note: Remote argument formats and game-specific attributes require live verification.
        Design: Faithful Recreation of Alexandria Hub Layout & Features
        Target Game: Steal KPOP Eggs
     ═══════════════════════════════════════════════════════════════════════════
@@ -27,10 +28,19 @@ local Camera              = workspace.CurrentCamera
 -- EXECUTOR COMPATIBILITY LAYER
 ---------------------------------------------------------------------------
 local function getGuiParent()
-    local success, parent = pcall(function()
-        return (gethui and gethui()) or CoreGui or LocalPlayer:WaitForChild("PlayerGui")
-    end)
-    return (success and parent) or LocalPlayer:WaitForChild("PlayerGui")
+    if type(gethui) == "function" then
+        local ok, parent = pcall(gethui)
+        if ok and parent then return parent end
+    end
+
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        or LocalPlayer:WaitForChild("PlayerGui", 10)
+    if playerGui then return playerGui end
+
+    -- CoreGui is a last resort; some environments do not permit parenting here.
+    local ok, parent = pcall(function() return CoreGui end)
+    if ok and parent then return parent end
+    return nil
 end
 
 local function safeFireProximityPrompt(prompt)
@@ -248,6 +258,7 @@ end
 ---------------------------------------------------------------------------
 -- CONFIGURATION & STATE
 ---------------------------------------------------------------------------
+local Running = true
 local Config = {
     -- Auto Steal Eggs
     AutoStealEggs       = false,
@@ -294,6 +305,14 @@ local Config = {
 ---------------------------------------------------------------------------
 -- HELPER FUNCTIONS
 ---------------------------------------------------------------------------
+local function getDelay(baseDelay)
+    baseDelay = tonumber(baseDelay) or 0
+    if Config.HumanizeDelays then
+        return math.max(0, baseDelay * (0.9 + math.random() * 0.2))
+    end
+    return baseDelay
+end
+
 local function getCharacter()
     return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 end
@@ -491,6 +510,18 @@ local function getAllEggs()
         if item:GetAttribute("OwnerUserId") == LocalPlayer.UserId then return end
         if item:GetAttribute("PersonalOwnerUserId") == LocalPlayer.UserId then return end
 
+        -- Blacklist filter: Ignore recently stolen eggs
+        if stolenBlacklist[item] and os.clock() < stolenBlacklist[item] then return end
+
+        -- Check if egg has a prompt and whether it's enabled
+        local prompt = item:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if not prompt and item:FindFirstChild("CasePart") then
+            prompt = item.CasePart:FindFirstChildWhichIsA("ProximityPrompt", true)
+        end
+        if prompt and not prompt.Enabled then
+            return -- egg is already taken or respawning
+        end
+
         local pivot = (item:IsA("Model") and item:GetPivot())
             or (item:FindFirstChild("CasePart") and item.CasePart.CFrame)
             or (item:FindFirstChild("Handle") and item.Handle.CFrame)
@@ -580,10 +611,8 @@ local function getAdminAndExclusiveEggs()
     local all = getAllEggs()
     local adminEggs = {}
     for _, egg in ipairs(all) do
-        if not (stolenBlacklist[egg.Object] and os.clock() < stolenBlacklist[egg.Object]) then
-            if egg.Rarity == "Admin" or egg.Rarity == "Exclusive" or egg.Zone == "GLOBAL" then
-                table.insert(adminEggs, egg)
-            end
+        if egg.Rarity == "Admin" or egg.Rarity == "Exclusive" or egg.Zone == "GLOBAL" then
+            table.insert(adminEggs, egg)
         end
     end
     return adminEggs
@@ -594,10 +623,6 @@ local function getAllEligibleEggs()
     local filtered = {}
 
     for _, egg in ipairs(all) do
-        if stolenBlacklist[egg.Object] and os.clock() < stolenBlacklist[egg.Object] then
-            continue
-        end
-
         local zonePass = false
         if next(Config.StealZoneFilters) == nil then
             zonePass = true
@@ -670,8 +695,8 @@ end
 local isStealingActive = false
 
 task.spawn(function()
-    while true do
-        task.wait(0.04)
+    while Running do
+        task.wait(getDelay(0.12))
         if Config.AutoStealEggs and not isStealingActive then
             local root = getRootPart()
             if not root then
@@ -761,24 +786,24 @@ task.spawn(function()
                         end
                     end
 
-                    -- 4. Fast grab dispatch & confirmation (yields ~0.1s for server network dispatch)
-                    local startHeld = isCarryingEgg()
-                    for _ = 1, 6 do
+                    -- 4. Micro-poll confirmation: Check if grabbed (held in hand, prompt disabled, or egg moved)
+                    -- Polls every 0.02s up to max 0.2s. The instant grabbed, snaps to base IMMEDIATELY!
+                    for _ = 1, 10 do
+                        local grabbed = isCarryingEgg() 
+                            or (prompt and (not prompt.Parent or not prompt.Enabled)) 
+                            or (not target.Object.Parent or not target.Object:IsDescendantOf(workspace))
+                        if grabbed then
+                            break
+                        end
                         task.wait(0.02)
-                        if not startHeld and isCarryingEgg() then
-                            break
-                        end
-                        if not target.Object.Parent or not target.Object:IsDescendantOf(workspace) then
-                            break
-                        end
                     end
 
                     -- 5. INSTANT SNAP BACK TO PLOT FLOOR
                     root.CFrame = returnCF
                     root.AssemblyLinearVelocity = Vector3.zero
 
-                    -- Blacklist target object so it is not re-selected immediately
-                    stolenBlacklist[target.Object] = os.clock() + 15
+                    -- Blacklist target object so it is NEVER re-selected immediately
+                    stolenBlacklist[target.Object] = os.clock() + 30
 
                     -- 6. Yield 0.04s at base for server safe-zone verification (GuardEscapedAt / Egg secured)
                     task.wait(0.04)
@@ -803,7 +828,7 @@ end)
 
 -- 2. AUTO PLACE EGGS SERVICE
 task.spawn(function()
-    while true do
+    while Running do
         task.wait(0.8)
         if Config.AutoPlaceEggs then
             local char = getCharacter()
@@ -839,7 +864,11 @@ task.spawn(function()
                         local incubatingCount = 0
                         local incCases = workspace:FindFirstChild("IncubatingCases")
                         if incCases then
-                            incubatingCount = #incCases:GetChildren()
+                            for _, case in ipairs(incCases:GetChildren()) do
+                                if case:GetAttribute("OwnerUserId") == LocalPlayer.UserId then
+                                    incubatingCount = incubatingCount + 1
+                                end
+                            end
                         end
                         local row = incubatingCount % 5 - 2
                         local col = math.floor(incubatingCount / 5) - 2
@@ -858,7 +887,7 @@ end)
 
 -- 3. AUTO HATCH SERVICE
 task.spawn(function()
-    while true do
+    while Running do
         task.wait(0.6)
         if Config.AutoHatch then
             local function checkFolder(folder)
@@ -890,7 +919,7 @@ end)
 
 -- 4. AUTO EQUIP BEST SERVICE
 task.spawn(function()
-    while true do
+    while Running do
         task.wait(3.5)
         if Config.AutoEquipBest and BaseMenuRequest then
             pcall(function()
@@ -902,7 +931,7 @@ end)
 
 -- 5. AUTO TREADMILL & TREADMILL UPGRADE SERVICE
 task.spawn(function()
-    while true do
+    while Running do
         task.wait(0.5)
         local myTreadmill = nil
         for _, tm in ipairs(CollectionService:GetTagged("Treadmill")) do
@@ -945,7 +974,7 @@ task.spawn(function()
     local indexTimer = 0
     local trailTimer = 0
 
-    while true do
+    while Running do
         task.wait(1)
 
         -- Auto Upgrade Base
@@ -1046,7 +1075,7 @@ local function neutralizeTraps()
 end
 
 task.spawn(function()
-    while true do
+    while Running do
         task.wait(0.5)
         if Config.AntiRagdoll then
             pcall(neutralizeTraps)
@@ -1054,7 +1083,7 @@ task.spawn(function()
     end
 end)
 
-workspace.DescendantAdded:Connect(function(desc)
+local workspaceDescendantConnection = workspace.DescendantAdded:Connect(function(desc)
     if Config.AntiRagdoll then
         if desc:IsA("Model") and (desc.Name:find("BearTrap") or desc.Name:find("Trap")) then
             for _, part in ipairs(desc:GetDescendants()) do
@@ -1067,39 +1096,50 @@ workspace.DescendantAdded:Connect(function(desc)
     end
 end)
 
-RunService.Heartbeat:Connect(function()
-    if Config.AntiRagdoll then
-        local char = getCharacter()
-        local hum = getHumanoid()
-        if hum then
-            hum.PlatformStand = false
-            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-            local st = hum:GetState()
-            if st == Enum.HumanoidStateType.Ragdoll or st == Enum.HumanoidStateType.FallingDown or hum.PlatformStand then
-                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
-            end
+task.spawn(function()
+    while Running do
+        if Config.AntiRagdoll then
+            local ok, err = pcall(function()
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    hum.PlatformStand = false
+                    hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+                    hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+                    local state = hum:GetState()
+                    if state == Enum.HumanoidStateType.Ragdoll or state == Enum.HumanoidStateType.FallingDown then
+                        hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                    end
+                end
+                if char then
+                    for _, attributeName in ipairs({"GuardRagdolled", "GuardPlatformStand", "GuardRecovering"}) do
+                        if char:GetAttribute(attributeName) == true then
+                            char:SetAttribute(attributeName, false)
+                        end
+                    end
+                    local ragdollScript = char:FindFirstChild("GuardRagdollClient")
+                    if ragdollScript and ragdollScript:IsA("LocalScript") and ragdollScript.Enabled then
+                        ragdollScript.Enabled = false
+                    end
+                end
+                if LocalPlayer:GetAttribute("GuardStunnedUntil") ~= nil then
+                    LocalPlayer:SetAttribute("GuardStunnedUntil", 0)
+                end
+            end)
+            if not ok then warn("[Alexandria] Anti-ragdoll update failed: " .. tostring(err)) end
         end
-        if char then
-            if char:GetAttribute("GuardRagdolled") == true then char:SetAttribute("GuardRagdolled", false) end
-            if char:GetAttribute("GuardPlatformStand") == true then char:SetAttribute("GuardPlatformStand", false) end
-            if char:GetAttribute("GuardRecovering") == true then char:SetAttribute("GuardRecovering", false) end
-            local grc = char:FindFirstChild("GuardRagdollClient")
-            if grc and grc:IsA("LocalScript") and grc.Enabled then
-                grc.Enabled = false
-            end
-        end
-        LocalPlayer:SetAttribute("GuardStunnedUntil", 0)
+        task.wait(0.2)
     end
 end)
 
--- 8. ANTI-AFK
-if Config.AntiAFK then
-    LocalPlayer.Idled:Connect(function()
+-- 8. ANTI-AFK (toggle-aware)
+local antiAfkConnection = LocalPlayer.Idled:Connect(function()
+    if not Running or not Config.AntiAFK then return end
+    pcall(function()
         VirtualUser:CaptureController()
         VirtualUser:ClickButton2(Vector2.new(0, 0))
     end)
-end
+end)
 
 ---------------------------------------------------------------------------
 -- USER INTERFACE: "Alexandria Main"
@@ -1229,9 +1269,17 @@ local function updateEggESP()
     end
 end
 
-RunService.Heartbeat:Connect(function()
-    if Config.EggESP then
-        updateEggESP()
+task.spawn(function()
+    while Running do
+        if Config.EggESP then
+            local ok, err = pcall(updateEggESP)
+            if not ok then warn("[Alexandria] Egg ESP update failed: " .. tostring(err)) end
+            task.wait(0.75)
+        else
+            -- Clear labels promptly when the feature is switched off.
+            if next(ActiveESPs) ~= nil then updateEggESP() end
+            task.wait(0.5)
+        end
     end
 end)
 
@@ -1279,7 +1327,7 @@ MainFrame.InputChanged:Connect(function(input)
     end
 end)
 
-UserInputService.InputChanged:Connect(function(input)
+local mainDragConnection = UserInputService.InputChanged:Connect(function(input)
     if input == dragInput and isDragging then
         local delta = input.Position - dragStart
         MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
@@ -1354,7 +1402,7 @@ FloatingIcon.InputChanged:Connect(function(input)
     end
 end)
 
-UserInputService.InputChanged:Connect(function(input)
+local floatingDragConnection = UserInputService.InputChanged:Connect(function(input)
     if input == fDragInput and fDragging then
         local delta = input.Position - fDragStart
         FloatingIcon.Position = UDim2.new(fStartPos.X.Scale, fStartPos.X.Offset + delta.X, fStartPos.Y.Scale, fStartPos.Y.Offset + delta.Y)
@@ -2136,10 +2184,31 @@ local function loadPreset()
             return HttpService:JSONDecode(content)
         end)
         if decodeSuccess and type(loadedConfig) == "table" then
-            for k, v in pairs(loadedConfig) do
-                Config[k] = v
+            local allowedTypes = {
+                AutoStealEggs="boolean", SnipeAdminEggs="boolean", StealZoneFilters="table",
+                StealRarityFilters="table", StealPriority="string", AutoPlaceEggs="boolean",
+                PlaceRarityFilters="table", AutoHatch="boolean", AutoEquipBest="boolean",
+                AutoGoOnTreadmill="boolean", AutoUpgradeTreadmill="boolean", AutoUpgradeBase="boolean",
+                AutoClaimIndex="boolean", AutoClaimDaily="boolean", AutoBuyTrail="boolean",
+                AutoBuyCosmetics="boolean", EggESP="boolean", ESPRarityFilters="table",
+                AntiRagdoll="boolean", AntiAFK="boolean", SafeTravelMode="boolean",
+                TweenSpeed="number", HumanizeDelays="boolean", SelectedTeleportZone="string"
+            }
+            for key, expectedType in pairs(allowedTypes) do
+                local value = loadedConfig[key]
+                if value ~= nil and type(value) == expectedType then
+                    if key == "StealPriority" then
+                        if value == "Nearest" or value == "Biggest" or value == "Random" then Config[key] = value end
+                    elseif key == "TweenSpeed" then
+                        Config[key] = math.clamp(value, 10, 250)
+                    elseif key == "SelectedTeleportZone" then
+                        if table.find(ZONES, value) then Config[key] = value end
+                    else
+                        Config[key] = value
+                    end
+                end
             end
-            setStatus("Preset Loaded successfully!")
+            setStatus("Preset loaded (validated). Some UI controls may need reopening to refresh their display.")
         else
             setStatus("Failed: Preset data corrupted!")
         end
@@ -2168,8 +2237,12 @@ local function resetDefaults()
     Config.EggESP = false
     Config.ESPRarityFilters = getDefaultRarityTable()
     Config.AntiRagdoll = true
+    Config.AntiAFK = true
     Config.SafeTravelMode = false
-    setStatus("Settings reset to defaults.")
+    Config.TweenSpeed = 80
+    Config.HumanizeDelays = false
+    Config.SelectedTeleportZone = "FOREST"
+    setStatus("Settings reset to defaults. Re-open the UI if a control still shows an old visual state.")
 end
 
 createButton(PresetCard, "💾 Save Current Preset", savePreset)
@@ -2177,24 +2250,48 @@ createButton(PresetCard, "📂 Load Saved Preset", loadPreset)
 createButton(PresetCard, "🔄 Reset to Default Settings", resetDefaults)
 
 local GeneralSettings = createCard(SettingsTab, "General Settings", "⚙")
-createToggle(GeneralSettings, "Safe Travel Mode (Anti-Detect Tween)", Config.SafeTravelMode, function(v)
+createToggle(GeneralSettings, "Safe Travel Mode (Tween Movement)", Config.SafeTravelMode, function(v)
     Config.SafeTravelMode = v
 end)
-createToggle(GeneralSettings, "Humanized Delay Jitter (Anti-Spam)", Config.HumanizeDelays, function(v)
+createToggle(GeneralSettings, "Randomized Delay (Pacing)", Config.HumanizeDelays, function(v)
     Config.HumanizeDelays = v
+end)
+createToggle(GeneralSettings, "Anti-AFK", Config.AntiAFK, function(v)
+    Config.AntiAFK = v
 end)
 createButton(GeneralSettings, "Toggle UI Visibility (or Press RightShift)", function()
     MainFrame.Visible = not MainFrame.Visible
 end)
+local rightShiftConnection
+
 createButton(GeneralSettings, "Unload Script & Destroy GUI", function()
+    if not Running then return end
+    Running = false
+    Config.AutoStealEggs = false
+    Config.AutoPlaceEggs = false
+    Config.AutoHatch = false
+    Config.AutoEquipBest = false
+    Config.AutoGoOnTreadmill = false
+    Config.AutoUpgradeTreadmill = false
+    Config.AutoUpgradeBase = false
+    Config.AutoClaimIndex = false
+    Config.AutoClaimDaily = false
+    Config.AutoBuyTrail = false
+    Config.AutoBuyCosmetics = false
     Config.EggESP = false
+    pcall(function() workspaceDescendantConnection:Disconnect() end)
+    pcall(function() rightShiftConnection:Disconnect() end)
+    pcall(function() mainDragConnection:Disconnect() end)
+    pcall(function() floatingDragConnection:Disconnect() end)
+    pcall(function() antiAfkConnection:Disconnect() end)
     for obj in pairs(ActiveESPs) do clearESP(obj) end
     ScreenGui:Destroy()
+    setStatus("Unloaded")
 end)
 
 -- Keybind: RightShift to toggle UI
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
+rightShiftConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if Running and not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
         MainFrame.Visible = not MainFrame.Visible
         if FloatingIcon.Visible then
             FloatingIcon.Visible = false
@@ -2209,7 +2306,7 @@ print([[
     ╔═══════════════════════════════════════════════════════════╗
     ║       ALEXANDRIA MAIN — STEAL KPOP EGGS LOADED!           ║
     ║       UI Hotkey: RightShift                               ║
-    ║       Version: 3.3.0 (Streamlined & Rapid)                ║
+    ║       Version: 3.4.0 (Stability & Performance)                ║
     ╚═══════════════════════════════════════════════════════════╝
 ]])
 
