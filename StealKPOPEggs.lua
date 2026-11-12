@@ -1,7 +1,7 @@
 --[[
     ═══════════════════════════════════════════════════════════════════════════
        ALEXANDRIA MAIN — STEAL KPOP EGGS ULTIMATE AUTOMATION SUITE
-       Version: 3.4.0 (Stability & Performance Update)
+       Version: 3.4.2 (Local Character Visibility Toggle)
        Note: Remote argument formats and game-specific attributes require live verification.
        Design: Faithful Recreation of Alexandria Hub Layout & Features
        Target Game: Steal KPOP Eggs
@@ -298,6 +298,7 @@ local Config = {
     -- Background protections
     AntiRagdoll         = true,
     AntiAFK             = true,
+    InvisibleCharacter  = false, -- Local-only visual invisibility; does not hide character from server/other players
 
     -- Movement mode
     SafeTravelMode      = false, -- Direct CFrame instant warp
@@ -332,6 +333,101 @@ local function getHumanoid()
     local char = getCharacter()
     return char and char:FindFirstChildOfClass("Humanoid")
 end
+
+---------------------------------------------------------------------------
+-- LOCAL CHARACTER INVISIBILITY (VISUAL ONLY)
+---------------------------------------------------------------------------
+-- Uses LocalTransparencyModifier so the change is local to this client.
+-- It does not change server replication, collision, or visibility for others.
+local InvisibleOriginals = {}
+local InvisibleDescendantConnection = nil
+local CharacterAddedVisibilityConnection = nil
+
+local function setInvisibleOnInstance(instance, enabled)
+    if not instance then return end
+
+    if instance:IsA("BasePart") then
+        if enabled then
+            if InvisibleOriginals[instance] == nil then
+                InvisibleOriginals[instance] = { kind = "LocalTransparencyModifier", value = instance.LocalTransparencyModifier }
+            end
+            instance.LocalTransparencyModifier = 1
+        else
+            local saved = InvisibleOriginals[instance]
+            if saved and saved.kind == "LocalTransparencyModifier" and instance.Parent then
+                pcall(function() instance.LocalTransparencyModifier = saved.value end)
+            end
+            InvisibleOriginals[instance] = nil
+        end
+        return
+    end
+
+    local propertyName
+    if instance:IsA("Decal") or instance:IsA("Texture") then
+        propertyName = "Transparency"
+    elseif instance:IsA("ParticleEmitter") or instance:IsA("Trail") or instance:IsA("Beam")
+        or instance:IsA("Highlight") or instance:IsA("BillboardGui") or instance:IsA("SurfaceGui") then
+        propertyName = "Enabled"
+    end
+
+    if not propertyName then return end
+    if enabled then
+        if InvisibleOriginals[instance] == nil then
+            local ok, value = pcall(function() return instance[propertyName] end)
+            if ok then InvisibleOriginals[instance] = { kind = propertyName, value = value } end
+        end
+        pcall(function() instance[propertyName] = propertyName == "Transparency" and 1 or false end)
+    else
+        local saved = InvisibleOriginals[instance]
+        if saved and saved.kind == propertyName and instance.Parent then
+            pcall(function() instance[propertyName] = saved.value end)
+        end
+        InvisibleOriginals[instance] = nil
+    end
+end
+
+local function applyCharacterInvisibility(character, enabled)
+    if enabled then
+        if not character then return end
+        for _, descendant in ipairs(character:GetDescendants()) do
+            setInvisibleOnInstance(descendant, true)
+        end
+        if InvisibleDescendantConnection then
+            pcall(function() InvisibleDescendantConnection:Disconnect() end)
+        end
+        InvisibleDescendantConnection = character.DescendantAdded:Connect(function(descendant)
+            if Config.InvisibleCharacter and Running then
+                setInvisibleOnInstance(descendant, true)
+            end
+        end)
+    else
+        if InvisibleDescendantConnection then
+            pcall(function() InvisibleDescendantConnection:Disconnect() end)
+            InvisibleDescendantConnection = nil
+        end
+        for instance in pairs(InvisibleOriginals) do
+            setInvisibleOnInstance(instance, false)
+        end
+        table.clear(InvisibleOriginals)
+    end
+end
+
+local function setCharacterInvisible(enabled)
+    Config.InvisibleCharacter = enabled == true
+    local character = LocalPlayer.Character
+    if Config.InvisibleCharacter then
+        applyCharacterInvisibility(character or getCharacter(), true)
+    else
+        applyCharacterInvisibility(character, false)
+    end
+end
+
+CharacterAddedVisibilityConnection = LocalPlayer.CharacterAdded:Connect(function(character)
+    if Config.InvisibleCharacter and Running then
+        task.wait(0.25)
+        applyCharacterInvisibility(character, true)
+    end
+end)
 
 local function getMoney()
     return LocalPlayer:GetAttribute("Money") or 0
@@ -2348,6 +2444,7 @@ local function resetDefaults()
     Config.ESPRarityFilters = getDefaultRarityTable()
     Config.AntiRagdoll = true
     Config.AntiAFK = true
+    setCharacterInvisible(false)
     Config.SafeTravelMode = false
     Config.TweenSpeed = 80
     Config.HumanizeDelays = false
@@ -2368,6 +2465,9 @@ createToggle(GeneralSettings, "Randomized Delay (Pacing)", Config.HumanizeDelays
 end)
 createToggle(GeneralSettings, "Anti-AFK", Config.AntiAFK, function(v)
     Config.AntiAFK = v
+end)
+createToggle(GeneralSettings, "Invisible Character (Local Only)", Config.InvisibleCharacter, function(v)
+    setCharacterInvisible(v)
 end)
 createButton(GeneralSettings, "Toggle UI Visibility (or Press RightShift)", function()
     MainFrame.Visible = not MainFrame.Visible
@@ -2394,6 +2494,8 @@ createButton(GeneralSettings, "Unload Script & Destroy GUI", function()
     pcall(function() mainDragConnection:Disconnect() end)
     pcall(function() floatingDragConnection:Disconnect() end)
     pcall(function() antiAfkConnection:Disconnect() end)
+    pcall(function() CharacterAddedVisibilityConnection:Disconnect() end)
+    setCharacterInvisible(false)
     for obj in pairs(ActiveESPs) do clearESP(obj) end
     ScreenGui:Destroy()
     setStatus("Unloaded")
@@ -2416,7 +2518,7 @@ print([[
     ╔═══════════════════════════════════════════════════════════╗
     ║       ALEXANDRIA MAIN — STEAL KPOP EGGS LOADED!           ║
     ║       UI Hotkey: RightShift                               ║
-    ║       Version: 3.4.0 (Stability & Performance)                ║
+    ║       Version: 3.4.2 (Invisible Character Toggle)              ║
     ╚═══════════════════════════════════════════════════════════╝
 ]])
 
