@@ -1,7 +1,7 @@
 --[[
     ═══════════════════════════════════════════════════════════════════════════
        ALEXANDRIA MAIN — STEAL KPOP EGGS ULTIMATE AUTOMATION SUITE
-       Version: 3.5.0 (Named Presets + Startup Preset Lock)
+       Version: 3.5.1 (Divine-Only Defaults + Biggest Priority + Named Presets)
        Note: Remote argument formats and game-specific attributes require live verification.
        Design: Faithful Recreation of Alexandria Hub Layout & Features
        Target Game: Steal KPOP Eggs
@@ -215,6 +215,11 @@ local function getDefaultRarityTable()
     return t
 end
 
+-- Default filter for the user's preferred Divine-only setup.
+local function getDivineOnlyRarityTable()
+    return { Divine = true }
+end
+
 ---------------------------------------------------------------------------
 -- WEIGHT (KG) FORMATTING HELPER
 ---------------------------------------------------------------------------
@@ -270,8 +275,8 @@ local Config = {
     AutoStealEggs       = false,
     SnipeAdminEggs      = false, -- Default UNCHECKED as requested
     StealZoneFilters    = getDefaultZoneTable(), -- All zones active by default
-    StealRarityFilters  = getDefaultRarityTable(), -- All rarities active by default
-    StealPriority       = "Nearest", -- "Nearest", "Biggest", "Random"
+    StealRarityFilters  = getDivineOnlyRarityTable(), -- Divine only by default
+    StealPriority       = "Biggest", -- Prefer the biggest egg
     StealStatus         = "Idle",
 
     -- Eggs (Plot)
@@ -293,7 +298,7 @@ local Config = {
 
     -- Egg ESP (Full map range, clean text with KG)
     EggESP              = false,
-    ESPRarityFilters    = getDefaultRarityTable(),
+    ESPRarityFilters    = getDivineOnlyRarityTable(), -- Divine only by default
 
     -- Background protections
     AntiRagdoll         = true,
@@ -2584,8 +2589,8 @@ local function resetDefaults()
     Config.AutoStealEggs = false
     Config.SnipeAdminEggs = false
     Config.StealZoneFilters = getDefaultZoneTable()
-    Config.StealRarityFilters = getDefaultRarityTable()
-    Config.StealPriority = "Nearest"
+    Config.StealRarityFilters = getDivineOnlyRarityTable()
+    Config.StealPriority = "Biggest"
     Config.AutoPlaceEggs = false
     Config.PlaceRarityFilters = getDefaultRarityTable()
     Config.AutoHatch = false
@@ -2598,7 +2603,7 @@ local function resetDefaults()
     Config.AutoBuyTrail = false
     Config.AutoBuyCosmetics = false
     Config.EggESP = false
-    Config.ESPRarityFilters = getDefaultRarityTable()
+    Config.ESPRarityFilters = getDivineOnlyRarityTable()
     Config.AntiRagdoll = true
     Config.AntiAFK = true
     Config.InvisibleCharacter = false
